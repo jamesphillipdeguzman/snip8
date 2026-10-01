@@ -56,7 +56,7 @@
                     <div class="flex items-center gap-2">
                         <h1 class="text-xl font-bold tracking-tight text-white">snip8</h1>
                         <span
-                            class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 font-semibold">v1.0</span>
+                            class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 font-semibold">v1.1</span>
                     </div>
                     <p class="text-xs text-slate-400 mt-0.5">Snip your timesheet, hit exactly 8 hours, and stop on time.
                     </p>
@@ -124,10 +124,10 @@
             <!-- 4 Quick Stat Cards -->
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow">
-                    <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">Total Logged (WTD)
+                    <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">Total Logged (Period)
                     </div>
                     <div id="dispTotalTracked" class="text-lg sm:text-xl font-mono font-bold text-white mt-1">--</div>
-                    <div class="text-[10px] text-slate-500 mt-0.5">Week-to-date total</div>
+                    <div class="text-[10px] text-slate-500 mt-0.5">Pay period total</div>
                 </div>
 
                 <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow">
@@ -176,18 +176,17 @@
                 </div>
             </div>
 
-            <!-- Full Weekly Breakdown Table -->
+            <!-- Dynamic Timesheet Breakdown Table -->
             <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-lg">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
-                        <h2 class="text-sm font-bold text-white uppercase tracking-wider">Weekly Timesheet Breakdown
-                        </h2>
+                        <h2 class="text-sm font-bold text-white uppercase tracking-wider">Timesheet Breakdown</h2>
                         <span
                             class="text-[10px] px-2 py-0.5 bg-slate-800 rounded text-slate-400 border border-slate-700 font-mono">8H
                             STRICT CAP</span>
                     </div>
-                    <span class="text-xs font-mono text-slate-400">Standard Week: <strong class="text-slate-200">40h 00m
-                            00s</strong></span>
+                    <span class="text-xs font-mono text-slate-400">Target: <strong class="text-slate-200">8h 00m /
+                            day</strong></span>
                 </div>
 
                 <div class="overflow-x-auto">
@@ -198,7 +197,6 @@
                                 <th class="py-2.5 px-3">LOGGED TIME</th>
                                 <th class="py-2.5 px-3">DAILY DELTA (VS 8H)</th>
                                 <th class="py-2.5 px-3">CUMULATIVE LOGGED</th>
-                                <th class="py-2.5 px-3">CUMULATIVE TARGET</th>
                                 <th class="py-2.5 px-3 text-right">STATUS</th>
                             </tr>
                         </thead>
@@ -272,8 +270,9 @@
                 <input type="number" id="manS" min="0" max="59" placeholder="SS"
                     class="w-16 bg-slate-900 border border-slate-700 rounded p-1.5 text-center font-mono outline-none focus:border-emerald-500 text-white">
                 <button id="manBtn"
-                    class="ml-2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 font-medium rounded text-xs text-white transition">Apply
-                    to Today</button>
+                    class="ml-2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 font-medium rounded text-xs text-white transition">
+                    Apply to Selected Day
+                </button>
             </div>
         </details>
 
@@ -295,14 +294,9 @@
         let targetTimestamp = null;
         let alarmDismissed = false;
 
-        let weekDays = [
-            { key: 'Mon', label: 'Mon 9/28', h: 0, m: 0, s: 0, sec: 0 },
-            { key: 'Tue', label: 'Tue 9/29', h: 0, m: 0, s: 0, sec: 0 },
-            { key: 'Wed', label: 'Wed 9/30', h: 0, m: 0, s: 0, sec: 0 },
-            { key: 'Thu', label: 'Thu 10/1', h: 0, m: 0, s: 0, sec: 0 },
-            { key: 'Fri', label: 'Fri 10/2', h: 0, m: 0, s: 0, sec: 0 }
-        ];
-        let selectedDayIndex = 3; // Default to Thursday/Today
+        // Dynamic days model (populated directly via OCR)
+        let detectedDays = [];
+        let selectedDayIndex = 0;
         let totalTrackedSec = 0;
 
         // Elements
@@ -326,7 +320,7 @@
                 const AudioContext = window.AudioContext || window.webkitAudioContext;
                 const ctx = new AudioContext();
 
-                const notes = [587.33, 739.99, 880]; // D5, F#5, A5 chime
+                const notes = [587.33, 739.99, 880]; // D5, F#5, A5
                 notes.forEach((freq, idx) => {
                     const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
@@ -381,7 +375,7 @@
             // Crop the header band where dates and hours reside if full desktop screenshot
             if (img.height > 600) {
                 sy = Math.floor(img.height * 0.08);
-                sh = Math.floor(img.height * 0.22);
+                sh = Math.floor(img.height * 0.20);
             }
 
             canvas.width = sw * 2;
@@ -424,43 +418,65 @@
 
             // 1. Total time tracked
             const totalMatch = cleaned.match(/Total\s*(?:time|tire)?\s*tracked\s*(\d{1,2})\s*(?:hr|h|br)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/i);
+            totalTrackedSec = 0;
             if (totalMatch) {
-                const th = parseInt(totalMatch[1], 10);
-                const tm = parseInt(totalMatch[2], 10);
-                const ts = parseInt(totalMatch[3], 10);
-                totalTrackedSec = th * 3600 + tm * 60 + ts;
+                totalTrackedSec = parseInt(totalMatch[1], 10) * 3600 + parseInt(totalMatch[2], 10) * 60 + parseInt(totalMatch[3], 10);
             }
 
-            // 2. Scan all daily durations
-            const durRegex = /(\d{1,2})\s*(?:hr|h|:)\s*(\d{1,2})\s*(?:min|m|:)\s*(\d{1,2})\s*(?:sec|s)?/gi;
-            const allDurs = [...cleaned.matchAll(durRegex)].map(m => {
-                const h = parseInt(m[1], 10);
-                const min = parseInt(m[2], 10);
-                const s = parseInt(m[3], 10);
-                return { h, m: min, s, total: h * 3600 + min * 60 + s };
-            }).filter(d => d.h <= 9 && d.m < 60 && d.s < 60);
-
-            if (allDurs.length >= 4) {
-                // Chronological map to Mon, Tue, Wed, Thu
-                const relevant = allDurs.slice(-4);
-                for (let i = 0; i < 4; i++) {
-                    weekDays[i].h = relevant[i].h;
-                    weekDays[i].m = relevant[i].m;
-                    weekDays[i].s = relevant[i].s;
-                    weekDays[i].sec = relevant[i].total;
+            // 2. Extract day header blocks with dates (e.g., "Fri 10/2 01 hr 40 min 00 sec")
+            detectedDays = [];
+            const colRegex = /(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[\s\S]{0,15}?(\d{1,2}\/\d{1,2})?[\s\S]{0,35}?(\d{1,2})\s*(?:hr|h)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/gi;
+            let m;
+            while ((m = colRegex.exec(cleaned)) !== null) {
+                const dayName = m[1];
+                const dateStr = m[2] || '';
+                const h = parseInt(m[3], 10);
+                const min = parseInt(m[4], 10);
+                const s = parseInt(m[5], 10);
+                if (h <= 12 && min < 60 && s < 60) {
+                    detectedDays.push({
+                        label: `${dayName} ${dateStr}`.trim(),
+                        h, m: min, s,
+                        sec: h * 3600 + min * 60 + s
+                    });
                 }
-                selectedDayIndex = 3; // Lock onto Thursday
-            } else if (allDurs.length > 0) {
-                // Single cropped column
-                const last = allDurs[allDurs.length - 1];
-                weekDays[selectedDayIndex].h = last.h;
-                weekDays[selectedDayIndex].m = last.m;
-                weekDays[selectedDayIndex].s = last.s;
-                weekDays[selectedDayIndex].sec = last.total;
+            }
+
+            // Fallback: If day names were skipped by OCR, match standalone duration blocks
+            if (detectedDays.length === 0) {
+                const durRegex = /(\d{1,2})\s*(?:hr|h|:)\s*(\d{1,2})\s*(?:min|m|:)\s*(\d{1,2})\s*(?:sec|s)?/gi;
+                const matches = [...cleaned.matchAll(durRegex)];
+                matches.forEach((match, idx) => {
+                    const h = parseInt(match[1], 10);
+                    const min = parseInt(match[2], 10);
+                    const s = parseInt(match[3], 10);
+                    // Ignore false positive timezone lines (e.g. 10 AM, 12 AM)
+                    if (h <= 10 && min < 60 && s < 60) {
+                        detectedDays.push({
+                            label: `Day ${idx + 1}`,
+                            h, m: min, s,
+                            sec: h * 3600 + min * 60 + s
+                        });
+                    }
+                });
+            }
+
+            if (detectedDays.length === 0) {
+                alert("Could not detect timesheet columns. Please use manual entry.");
+                return;
+            }
+
+            // Automatically select the latest day with logged hours > 0 (e.g. today)
+            selectedDayIndex = 0;
+            for (let i = detectedDays.length - 1; i >= 0; i--) {
+                if (detectedDays[i].sec > 0) {
+                    selectedDayIndex = i;
+                    break;
+                }
             }
 
             if (totalTrackedSec === 0) {
-                totalTrackedSec = weekDays.reduce((acc, d) => acc + d.sec, 0);
+                totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
             }
 
             renderAll();
@@ -475,7 +491,7 @@
             const totS = totalTrackedSec % 60;
             dispTotalTracked.textContent = `${totH}h ${totM}m ${totS}s`;
 
-            const today = weekDays[selectedDayIndex];
+            const today = detectedDays[selectedDayIndex] || { label: 'Active Day', h: 0, m: 0, s: 0, sec: 0 };
             dispTodayLogged.textContent = `${today.h}h ${today.m}m ${today.s}s`;
             dispTodayLabel.textContent = `${today.label} Active Column`;
 
@@ -493,7 +509,7 @@
             weeklyTableBody.innerHTML = '';
             let runningCumulative = 0;
 
-            weekDays.forEach((day, idx) => {
+            detectedDays.forEach((day, idx) => {
                 runningCumulative += day.sec;
                 const deltaSec = day.sec - TARGET_DAILY_SEC;
 
@@ -509,7 +525,7 @@
                     const sign = deltaSec >= 0 ? '+' : '-';
                     deltaStr = `${sign}${dh}h ${dm}m ${ds}s`;
                     deltaColor = deltaSec >= 0 ? 'text-emerald-400' : 'text-amber-400';
-                    statusBadge = `<span class="text-emerald-400 font-semibold">✔ Completed</span>`;
+                    statusBadge = `<span class="text-emerald-400 font-semibold">✔ Logged</span>`;
                 }
 
                 const isCurrent = idx === selectedDayIndex;
@@ -531,7 +547,6 @@
           <td class="py-3 px-3 text-slate-200">${day.h}h ${String(day.m).padStart(2, '0')}m ${String(day.s).padStart(2, '0')}s</td>
           <td class="py-3 px-3 ${deltaColor} font-semibold">${deltaStr}</td>
           <td class="py-3 px-3 text-slate-300">${cumH}h ${String(cumM).padStart(2, '0')}m ${String(cumS).padStart(2, '0')}s</td>
-          <td class="py-3 px-3 text-slate-500">${(idx + 1) * 8}h 00m</td>
           <td class="py-3 px-3 text-right">${statusBadge}</td>
         `;
                 weeklyTableBody.appendChild(tr);
@@ -607,12 +622,14 @@
             const h = parseInt(document.getElementById('manH').value || 0, 10);
             const m = parseInt(document.getElementById('manM').value || 0, 10);
             const s = parseInt(document.getElementById('manS').value || 0, 10);
-            weekDays[selectedDayIndex].h = h;
-            weekDays[selectedDayIndex].m = m;
-            weekDays[selectedDayIndex].s = s;
-            weekDays[selectedDayIndex].sec = h * 3600 + m * 60 + s;
-            totalTrackedSec = weekDays.reduce((acc, d) => acc + d.sec, 0);
-            renderAll();
+            if (detectedDays[selectedDayIndex]) {
+                detectedDays[selectedDayIndex].h = h;
+                detectedDays[selectedDayIndex].m = m;
+                detectedDays[selectedDayIndex].s = s;
+                detectedDays[selectedDayIndex].sec = h * 3600 + m * 60 + s;
+                totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
+                renderAll();
+            }
         });
     </script>
 </body>
