@@ -410,63 +410,123 @@
         function parseText(rawText) {
             if (!rawText) return;
 
+            // 1. Header & Duration Normalization
             const cleaned = rawText
                 .replace(/[oOQ]([0-9])/g, '0$1')
                 .replace(/([0-9])[oOQ]/g, '$10')
+                .replace(/racksd|tracksd/gi, 'tracked')
+                .replace(/\btine\b/gi, 'time')
+                .replace(/\bThr\s*,/gi, '1 hr,')
+                .replace(/\bThr\b/gi, '1 hr')
+                .replace(/\bG0\b/g, '00')
+                .replace(/G0/g, '00')
                 .replace(/rnin|min|mln/gi, 'min')
-                .replace(/ser|see|soc|soe|sec/gi, 'sec');
+                .replace(/ser|see|soc|soe|sec/gi, 'sec')
+                // Normalize empty column OCR misreads (00 hr 00 min 00 sec read as G0/00 hr 20 min 00 sec)
+                .replace(/\b0{1,2}\s*(?:hr|h)\s*,?\s*20\s*(?:min|m)\s*,?\s*0{1,2}\s*(?:sec|s)?/gi, '00 hr 00 min 00 sec')
+                .replace(/\b0{1,2}\s*(?:hr|h)\s*,?\s*20\s*(?:min|m)\s*,?\s*0\b/gi, '00 hr 00 min 00 sec');
 
             // 1. Total time tracked
-            const totalMatch = cleaned.match(/Total\s*(?:time|tire)?\s*tracked\s*(\d{1,2})\s*(?:hr|h|br)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/i);
+            const totalMatch = cleaned.match(/Total\s*(?:time|tire|tine)?\s*(?:tracked)?\s*(\d{1,2})\s*(?:hr|h|br)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/i);
             totalTrackedSec = 0;
             if (totalMatch) {
                 totalTrackedSec = parseInt(totalMatch[1], 10) * 3600 + parseInt(totalMatch[2], 10) * 60 + parseInt(totalMatch[3], 10);
             }
 
-            // 2. Extract day header blocks with dates (e.g., "Fri 10/2 01 hr 40 min 00 sec")
-            detectedDays = [];
-            const colRegex = /(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[\s\S]{0,15}?(\d{1,2}\/\d{1,2})?[\s\S]{0,35}?(\d{1,2})\s*(?:hr|h)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/gi;
-            let m;
-            while ((m = colRegex.exec(cleaned)) !== null) {
-                const dayName = m[1];
-                const dateStr = m[2] || '';
-                const h = parseInt(m[3], 10);
-                const min = parseInt(m[4], 10);
-                const s = parseInt(m[5], 10);
-                if (h <= 12 && min < 60 && s < 60) {
-                    detectedDays.push({
-                        label: `${dayName} ${dateStr}`.trim(),
-                        h, m: min, s,
+            // Remove total match from column extraction scope to prevent collision
+            let textForColumns = cleaned;
+            if (totalMatch) {
+                textForColumns = cleaned.replace(totalMatch[0], ' ');
+            }
+
+            // 2. Two-Pass Array Alignment
+            // Pass 1: Extract all detected date headers
+            const dayHeaderRegex = /(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Man)\s*(\d{1,2}[\/\w]+)/gi;
+            const daysFound = [];
+            let hm;
+            while ((hm = dayHeaderRegex.exec(textForColumns)) !== null) {
+                let dayName = hm[1];
+                if (/^man$/i.test(dayName)) dayName = 'Mon';
+                const datePart = hm[2].replace(/([0-9])[A|Il\\]([0-9])/g, '$1/$2');
+                daysFound.push({ label: `${dayName} ${datePart}`.trim() });
+            }
+
+            // Fallback for header rows without date numbers
+            if (daysFound.length === 0) {
+                const standaloneHeaderRegex = /(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Man)/gi;
+                let shm;
+                while ((shm = standaloneHeaderRegex.exec(textForColumns)) !== null) {
+                    let dayName = shm[1];
+                    if (/^man$/i.test(dayName)) dayName = 'Mon';
+                    daysFound.push({ label: dayName });
+                }
+            }
+
+            // Pass 2: Extract all parsed durations
+            const durRegex = /(\d{1,2})\s*(?:hr|h)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/gi;
+            const parsedDurations = [];
+            let dm;
+            while ((dm = durRegex.exec(textForColumns)) !== null) {
+                const h = parseInt(dm[1], 10);
+                let min = parseInt(dm[2], 10);
+                const s = parseInt(dm[3], 10);
+                // Treat 00 hr 20 min 00 sec from empty columns as 00 hr 00 min 00 sec
+                if (h === 0 && min === 20 && s === 0) {
+                    min = 0;
+                }
+                if (h <= 24 && min < 60 && s < 60) {
+                    parsedDurations.push({
+                        h,
+                        m: min,
+                        s,
                         sec: h * 3600 + min * 60 + s
                     });
                 }
             }
 
-            // Fallback: If day names were skipped by OCR, match standalone duration blocks
-            if (detectedDays.length === 0) {
-                const durRegex = /(\d{1,2})\s*(?:hr|h|:)\s*(\d{1,2})\s*(?:min|m|:)\s*(\d{1,2})\s*(?:sec|s)?/gi;
-                const matches = [...cleaned.matchAll(durRegex)];
-                matches.forEach((match, idx) => {
-                    const h = parseInt(match[1], 10);
-                    const min = parseInt(match[2], 10);
-                    const s = parseInt(match[3], 10);
-                    // Ignore false positive timezone lines (e.g. 10 AM, 12 AM)
-                    if (h <= 10 && min < 60 && s < 60) {
-                        detectedDays.push({
-                            label: `Day ${idx + 1}`,
-                            h, m: min, s,
+            // Fallback: simple colon format (e.g. 1:40:00)
+            if (parsedDurations.length === 0) {
+                const fallbackDurRegex = /(\d{1,2})\s*(?:hr|h|:)\s*(\d{1,2})\s*(?:min|m|:)\s*(\d{1,2})\s*(?:sec|s)?/gi;
+                let fdm;
+                while ((fdm = fallbackDurRegex.exec(textForColumns)) !== null) {
+                    const h = parseInt(fdm[1], 10);
+                    let min = parseInt(fdm[2], 10);
+                    const s = parseInt(fdm[3] || 0, 10);
+                    if (h === 0 && min === 20 && s === 0) {
+                        min = 0;
+                    }
+                    if (h <= 24 && min < 60 && s < 60) {
+                        parsedDurations.push({
+                            h,
+                            m: min,
+                            s,
                             sec: h * 3600 + min * 60 + s
                         });
                     }
-                });
+                }
             }
 
-            if (detectedDays.length === 0) {
+            if (daysFound.length === 0 && parsedDurations.length === 0) {
                 alert("Could not detect timesheet columns. Please use manual entry.");
                 return;
             }
 
-            // Automatically select the latest day with logged hours > 0 (e.g. today)
+            // Pair sequentially by index (daysFound[i] with parsedDurations[i])
+            const maxCount = Math.max(daysFound.length, parsedDurations.length);
+            detectedDays = [];
+            for (let i = 0; i < maxCount; i++) {
+                const label = daysFound[i] ? daysFound[i].label : `Day ${i + 1}`;
+                const dur = parsedDurations[i] || { h: 0, m: 0, s: 0, sec: 0 };
+                detectedDays.push({
+                    label,
+                    h: dur.h,
+                    m: dur.m,
+                    s: dur.s,
+                    sec: dur.sec
+                });
+            }
+
+            // 3. Auto-Selection: Default to latest column with sec > 0
             selectedDayIndex = 0;
             for (let i = detectedDays.length - 1; i >= 0; i--) {
                 if (detectedDays[i].sec > 0) {
@@ -622,14 +682,17 @@
             const h = parseInt(document.getElementById('manH').value || 0, 10);
             const m = parseInt(document.getElementById('manM').value || 0, 10);
             const s = parseInt(document.getElementById('manS').value || 0, 10);
-            if (detectedDays[selectedDayIndex]) {
+            if (detectedDays.length === 0) {
+                detectedDays = [{ label: 'Today', h, m, s, sec: h * 3600 + m * 60 + s }];
+                selectedDayIndex = 0;
+            } else if (detectedDays[selectedDayIndex]) {
                 detectedDays[selectedDayIndex].h = h;
                 detectedDays[selectedDayIndex].m = m;
                 detectedDays[selectedDayIndex].s = s;
                 detectedDays[selectedDayIndex].sec = h * 3600 + m * 60 + s;
-                totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
-                renderAll();
             }
+            totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
+            renderAll();
         });
     </script>
 </body>
