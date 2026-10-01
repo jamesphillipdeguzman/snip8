@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>snip8 — Snip Your Screenshot, Hit 8 Hours</title>
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tesseract.js for in-browser OCR (No server required) -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+
+<body
+    class="bg-slate-950 text-slate-100 min-h-screen p-4 sm:p-6 flex flex-col items-center selection:bg-emerald-500 selection:text-slate-950">
+
+    <div class="w-full max-w-4xl space-y-5">
+
+        <!-- Top Bar -->
+        <header
+            class="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-xl backdrop-blur">
+            <div class="flex items-center gap-3">
+                <div
+                    class="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-xl shadow-lg shadow-emerald-500/20">
+                    ✂️
+                </div>
+                <div>
+                    <div class="flex items-center gap-2">
+                        <h1 class="text-xl font-bold tracking-tight text-white">snip8</h1>
+                        <span
+                            class="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 font-semibold">v1.0</span>
+                    </div>
+                    <p class="text-xs text-slate-400 mt-0.5">Snip your timesheet, hit exactly 8 hours, and stop on time.
+                    </p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <span
+                    class="text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-400">Strict
+                    Daily Cap: 8h 00m</span>
+                <button id="testAudioBtn"
+                    class="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 active:scale-95 border border-slate-700 rounded-lg text-xs font-medium text-slate-200 transition flex items-center gap-1.5">
+                    <span>🔔</span> Test Chime
+                </button>
+            </div>
+        </header>
+
+        <!-- Loud Alarm Banner (Flashes when time is up) -->
+        <div id="alarmBanner"
+            class="hidden bg-gradient-to-r from-rose-600 to-red-700 border-2 border-rose-400 p-4 rounded-2xl flex items-center justify-between shadow-2xl shadow-rose-900/40 animate-pulse">
+            <div class="flex items-center gap-3">
+                <span class="text-2xl animate-bounce">⏰</span>
+                <div>
+                    <div class="font-bold text-white text-base">8 HOURS REACHED — STOP TIMER!</div>
+                    <div class="text-xs text-rose-100">Clock out in Springboard / Clockify now before passing the
+                        5-minute grace period.</div>
+                </div>
+            </div>
+            <button id="dismissBtn"
+                class="px-4 py-2 bg-white text-rose-700 font-extrabold rounded-xl text-xs shadow hover:bg-rose-50 active:scale-95 transition">
+                Dismiss Alarm
+            </button>
+        </div>
+
+        <!-- Screenshot Drop / Paste Zone -->
+        <section id="dropZone"
+            class="border-2 border-dashed border-slate-800 hover:border-emerald-500 bg-slate-900/50 hover:bg-slate-900/80 rounded-2xl p-8 text-center cursor-pointer transition flex flex-col items-center justify-center gap-2.5 shadow-lg group">
+            <div
+                class="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 group-hover:text-emerald-400 group-hover:scale-110 transition">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                        d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.233-2.33 3 3 0 0 1 3.758 3.848A3.752 3.752 0 0 1 18 19.5H6.75Z" />
+                </svg>
+            </div>
+            <span class="text-sm font-medium text-slate-200">
+                Press <kbd
+                    class="px-2 py-0.5 bg-slate-800 border border-slate-700 rounded text-xs text-emerald-400 font-mono">Ctrl
+                    + V</kbd> to paste screenshot, or click to upload
+            </span>
+            <p class="text-xs text-slate-400">
+                💡 <strong>Tip:</strong> Press <kbd
+                    class="px-1.5 py-0.5 bg-slate-800 border border-slate-700 rounded text-[11px] font-mono text-slate-300">Win
+                    + Shift + S</kbd> to crop the day header row or full week view.
+            </p>
+            <input type="file" id="fileInput" accept="image/*" class="hidden">
+        </section>
+
+        <!-- Scan Progress Bar -->
+        <div id="statusContainer"
+            class="hidden text-center text-xs font-mono text-emerald-400 p-2 bg-emerald-950/40 border border-emerald-500/20 rounded-xl animate-pulse">
+            Enhancing image contrast and scanning hours with OCR...
+        </div>
+
+        <!-- Active Timer & Status Dashboard -->
+        <main id="dashboard" class="hidden space-y-5">
+            <!-- 4 Quick Stat Cards -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow">
+                    <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">Total Logged (WTD)
+                    </div>
+                    <div id="dispTotalTracked" class="text-lg sm:text-xl font-mono font-bold text-white mt-1">--</div>
+                    <div class="text-[10px] text-slate-500 mt-0.5">Week-to-date total</div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow">
+                    <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">Selected Day Logged
+                    </div>
+                    <div id="dispTodayLogged" class="text-lg sm:text-xl font-mono font-bold text-emerald-400 mt-1">--
+                    </div>
+                    <div id="dispTodayLabel" class="text-[10px] text-emerald-400/80 mt-0.5 font-medium">--</div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow">
+                    <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">Target Stop Clock
+                    </div>
+                    <div id="dispStopTime" class="text-lg sm:text-xl font-mono font-bold text-amber-400 mt-1">--</div>
+                    <div class="text-[10px] text-slate-500 mt-0.5">Local wall clock time</div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 p-4 rounded-xl shadow">
+                    <div class="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">Needed for 8h</div>
+                    <div id="dispRemaining" class="text-lg sm:text-xl font-mono font-bold text-white mt-1">--</div>
+                    <div class="text-[10px] text-rose-400 mt-0.5">+5m policy grace cutoff</div>
+                </div>
+            </div>
+
+            <!-- Live Remaining Countdown Box -->
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 text-center space-y-3 shadow-xl">
+                <div class="text-xs uppercase tracking-wider text-slate-400 font-bold">Live Remaining Countdown to Stop
+                    Timer</div>
+                <div id="countdown" class="text-5xl sm:text-7xl font-mono font-black text-white tracking-tight">00:00:00
+                </div>
+
+                <!-- Controls -->
+                <div class="pt-3 flex flex-wrap items-center justify-center gap-2">
+                    <button id="adjustMinus5"
+                        class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">-5m</button>
+                    <button id="adjustMinus1"
+                        class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">-1m</button>
+                    <button id="adjustPlus1"
+                        class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">+1m</button>
+                    <button id="adjustPlus5"
+                        class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">+5m</button>
+                    <button id="resetBtn"
+                        class="ml-2 px-4 py-1.5 bg-slate-800 hover:bg-rose-950 hover:text-rose-300 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 transition">
+                        ⏹ Reset Timer
+                    </button>
+                </div>
+            </div>
+
+            <!-- Full Weekly Breakdown Table -->
+            <section class="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4 shadow-lg">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <h2 class="text-sm font-bold text-white uppercase tracking-wider">Weekly Timesheet Breakdown
+                        </h2>
+                        <span
+                            class="text-[10px] px-2 py-0.5 bg-slate-800 rounded text-slate-400 border border-slate-700 font-mono">8H
+                            STRICT CAP</span>
+                    </div>
+                    <span class="text-xs font-mono text-slate-400">Standard Week: <strong class="text-slate-200">40h 00m
+                            00s</strong></span>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs font-mono">
+                        <thead>
+                            <tr class="border-b border-slate-800 text-slate-400 text-[11px]">
+                                <th class="py-2.5 px-3">DAY</th>
+                                <th class="py-2.5 px-3">LOGGED TIME</th>
+                                <th class="py-2.5 px-3">DAILY DELTA (VS 8H)</th>
+                                <th class="py-2.5 px-3">CUMULATIVE LOGGED</th>
+                                <th class="py-2.5 px-3">CUMULATIVE TARGET</th>
+                                <th class="py-2.5 px-3 text-right">STATUS</th>
+                            </tr>
+                        </thead>
+                        <tbody id="weeklyTableBody" class="divide-y divide-slate-800/60">
+                            <!-- Dynamically populated rows -->
+                        </tbody>
+                    </table>
+                </div>
+                <p class="text-[11px] text-slate-500">💡 Click any row above to recalculate the stop timer for that
+                    specific day.</p>
+            </section>
+        </main>
+
+        <!-- Timesheet Policy & Compliance Info (Accordion) -->
+        <details class="text-xs border-t border-slate-800 pt-3" open>
+            <summary
+                class="cursor-pointer font-semibold text-slate-300 hover:text-white select-none flex items-center gap-1.5">
+                <span>📋</span> Timesheet Policy & Compliance Info (Section 4.a)
+            </summary>
+            <div
+                class="mt-3 bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-3 text-slate-300 leading-relaxed shadow-inner">
+                <div
+                    class="border-l-2 border-amber-400 pl-3 py-1 text-amber-200/90 text-xs italic bg-amber-950/20 rounded-r">
+                    "If the team member clocks over 8 hours, it will be edited back to 8 hours and the team member will
+                    not receive any payment for the extra time. There is a 5 minute grace period after the end of the
+                    time period (so a team member may record 8 hours 5 minutes), but any time past that will count as a
+                    violation of this policy, and repeated violations will result in formal correction."
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1">
+                    <div class="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                        <span class="text-[11px] font-bold text-emerald-400 uppercase tracking-wide block">8h 00m
+                            Target</span>
+                        <span class="text-[11px] text-slate-400">Aim to stop timer between 7h 55m and 8h 00m. 100%
+                            compliant and fully paid.</span>
+                    </div>
+                    <div class="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                        <span class="text-[11px] font-bold text-amber-400 uppercase tracking-wide block">5m Grace
+                            Window</span>
+                        <span class="text-[11px] text-slate-400">8h 00m to 8h 05m is permitted without disciplinary
+                            penalty, but extra minutes are unpaid.</span>
+                    </div>
+                    <div class="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                        <span class="text-[11px] font-bold text-rose-400 uppercase tracking-wide block">&gt;8h 05m
+                            Violation</span>
+                        <span class="text-[11px] text-slate-400">Clocking past 8h 05m counts as a formal policy
+                            violation. Do not restart the timer.</span>
+                    </div>
+                </div>
+
+                <div class="text-[11px] text-slate-400 border-t border-slate-800/80 pt-2 flex flex-col gap-1">
+                    <span>• <strong>Undertime Clarification:</strong> Stopping 2–4 minutes before 8:00:00 (e.g., 7h 56m)
+                        is completely normal and is <em>not</em> penalized as a policy breach.</span>
+                    <span>• <strong>Strict Daily Isolation:</strong> Surplus hours from previous days do not reduce
+                        today's daily 8h requirement. Each day is evaluated independently.</span>
+                </div>
+            </div>
+        </details>
+
+        <!-- Manual Time Override -->
+        <details class="text-xs text-slate-400 border-t border-slate-800 pt-3">
+            <summary class="cursor-pointer hover:text-slate-300 select-none">Manual Time Override / Direct Entry
+            </summary>
+            <div class="flex items-center gap-2 mt-2">
+                <input type="number" id="manH" min="0" max="8" placeholder="HH"
+                    class="w-16 bg-slate-900 border border-slate-700 rounded p-1.5 text-center font-mono outline-none focus:border-emerald-500 text-white">
+                <span>:</span>
+                <input type="number" id="manM" min="0" max="59" placeholder="MM"
+                    class="w-16 bg-slate-900 border border-slate-700 rounded p-1.5 text-center font-mono outline-none focus:border-emerald-500 text-white">
+                <span>:</span>
+                <input type="number" id="manS" min="0" max="59" placeholder="SS"
+                    class="w-16 bg-slate-900 border border-slate-700 rounded p-1.5 text-center font-mono outline-none focus:border-emerald-500 text-white">
+                <button id="manBtn"
+                    class="ml-2 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 font-medium rounded text-xs text-white transition">Apply
+                    to Today</button>
+            </div>
+        </details>
+
+        <!-- Diagnostics / Raw OCR Log -->
+        <details class="text-xs text-slate-500 border-t border-slate-800/60 pt-2">
+            <summary class="cursor-pointer hover:text-slate-400 select-none">OCR Diagnostics / Raw Output</summary>
+            <div class="mt-2 p-3 bg-slate-900/80 rounded border border-slate-800 font-mono text-[11px] whitespace-pre-wrap text-slate-400"
+                id="rawOcrText">
+                (No image scanned yet)
+            </div>
+        </details>
+
+    </div>
+
+    <script>
+        const TARGET_DAILY_SEC = 8 * 3600;
+        let countdownInterval = null;
+        let alarmInterval = null;
+        let targetTimestamp = null;
+        let alarmDismissed = false;
+
+        let weekDays = [
+            { key: 'Mon', label: 'Mon 9/28', h: 0, m: 0, s: 0, sec: 0 },
+            { key: 'Tue', label: 'Tue 9/29', h: 0, m: 0, s: 0, sec: 0 },
+            { key: 'Wed', label: 'Wed 9/30', h: 0, m: 0, s: 0, sec: 0 },
+            { key: 'Thu', label: 'Thu 10/1', h: 0, m: 0, s: 0, sec: 0 },
+            { key: 'Fri', label: 'Fri 10/2', h: 0, m: 0, s: 0, sec: 0 }
+        ];
+        let selectedDayIndex = 3; // Default to Thursday/Today
+        let totalTrackedSec = 0;
+
+        // Elements
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const statusContainer = document.getElementById('statusContainer');
+        const dashboard = document.getElementById('dashboard');
+        const dispTotalTracked = document.getElementById('dispTotalTracked');
+        const dispTodayLogged = document.getElementById('dispTodayLogged');
+        const dispTodayLabel = document.getElementById('dispTodayLabel');
+        const dispStopTime = document.getElementById('dispStopTime');
+        const dispRemaining = document.getElementById('dispRemaining');
+        const countdown = document.getElementById('countdown');
+        const weeklyTableBody = document.getElementById('weeklyTableBody');
+        const alarmBanner = document.getElementById('alarmBanner');
+        const rawOcrText = document.getElementById('rawOcrText');
+
+        // Web Audio Chime (Triple Bell Pattern)
+        function playBeep() {
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                const ctx = new AudioContext();
+
+                const notes = [587.33, 739.99, 880]; // D5, F#5, A5 chime
+                notes.forEach((freq, idx) => {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(freq, ctx.currentTime + idx * 0.15);
+
+                    gain.gain.setValueAtTime(0, ctx.currentTime + idx * 0.15);
+                    gain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + idx * 0.15 + 0.02);
+                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.15 + 0.35);
+
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+
+                    osc.start(ctx.currentTime + idx * 0.15);
+                    osc.stop(ctx.currentTime + idx * 0.15 + 0.4);
+                });
+            } catch (e) {
+                console.error("Audio error", e);
+            }
+        }
+
+        document.getElementById('testAudioBtn').addEventListener('click', playBeep);
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) processFile(e.target.files[0]);
+        });
+
+        window.addEventListener('paste', (e) => {
+            const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+            for (const item of items) {
+                if (item.type.indexOf('image') !== -1) {
+                    processFile(item.getAsFile());
+                    break;
+                }
+            }
+        });
+
+        async function processFile(file) {
+            statusContainer.classList.remove('hidden');
+            statusContainer.textContent = "Enhancing contrast and running OCR on timesheet...";
+
+            const img = new Image();
+            img.src = URL.createObjectURL(file);
+            await img.decode();
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            let sx = 0, sy = 0, sw = img.width, sh = img.height;
+
+            // Crop the header band where dates and hours reside if full desktop screenshot
+            if (img.height > 600) {
+                sy = Math.floor(img.height * 0.08);
+                sh = Math.floor(img.height * 0.22);
+            }
+
+            canvas.width = sw * 2;
+            canvas.height = sh * 2;
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+
+            // Contrast enhancement: convert faint gray font to pure dark pixels
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imgData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                const brightness = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+                if (brightness < 185) {
+                    data[i] = 0; data[i + 1] = 0; data[i + 2] = 0;
+                } else {
+                    data[i] = 255; data[i + 1] = 255; data[i + 2] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+
+            try {
+                const result = await Tesseract.recognize(canvas, 'eng');
+                statusContainer.classList.add('hidden');
+                rawOcrText.textContent = result.data.text || "(No readable text detected)";
+                parseText(result.data.text);
+            } catch (err) {
+                statusContainer.classList.remove('hidden');
+                statusContainer.textContent = "OCR scan failed. Use manual entry below.";
+            }
+        }
+
+        function parseText(rawText) {
+            if (!rawText) return;
+
+            const cleaned = rawText
+                .replace(/[oOQ]([0-9])/g, '0$1')
+                .replace(/([0-9])[oOQ]/g, '$10')
+                .replace(/rnin|min|mln/gi, 'min')
+                .replace(/ser|see|soc|soe|sec/gi, 'sec');
+
+            // 1. Total time tracked
+            const totalMatch = cleaned.match(/Total\s*(?:time|tire)?\s*tracked\s*(\d{1,2})\s*(?:hr|h|br)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/i);
+            if (totalMatch) {
+                const th = parseInt(totalMatch[1], 10);
+                const tm = parseInt(totalMatch[2], 10);
+                const ts = parseInt(totalMatch[3], 10);
+                totalTrackedSec = th * 3600 + tm * 60 + ts;
+            }
+
+            // 2. Scan all daily durations
+            const durRegex = /(\d{1,2})\s*(?:hr|h|:)\s*(\d{1,2})\s*(?:min|m|:)\s*(\d{1,2})\s*(?:sec|s)?/gi;
+            const allDurs = [...cleaned.matchAll(durRegex)].map(m => {
+                const h = parseInt(m[1], 10);
+                const min = parseInt(m[2], 10);
+                const s = parseInt(m[3], 10);
+                return { h, m: min, s, total: h * 3600 + min * 60 + s };
+            }).filter(d => d.h <= 9 && d.m < 60 && d.s < 60);
+
+            if (allDurs.length >= 4) {
+                // Chronological map to Mon, Tue, Wed, Thu
+                const relevant = allDurs.slice(-4);
+                for (let i = 0; i < 4; i++) {
+                    weekDays[i].h = relevant[i].h;
+                    weekDays[i].m = relevant[i].m;
+                    weekDays[i].s = relevant[i].s;
+                    weekDays[i].sec = relevant[i].total;
+                }
+                selectedDayIndex = 3; // Lock onto Thursday
+            } else if (allDurs.length > 0) {
+                // Single cropped column
+                const last = allDurs[allDurs.length - 1];
+                weekDays[selectedDayIndex].h = last.h;
+                weekDays[selectedDayIndex].m = last.m;
+                weekDays[selectedDayIndex].s = last.s;
+                weekDays[selectedDayIndex].sec = last.total;
+            }
+
+            if (totalTrackedSec === 0) {
+                totalTrackedSec = weekDays.reduce((acc, d) => acc + d.sec, 0);
+            }
+
+            renderAll();
+        }
+
+        function renderAll() {
+            dashboard.classList.remove('hidden');
+
+            // Top Cards
+            const totH = Math.floor(totalTrackedSec / 3600);
+            const totM = Math.floor((totalTrackedSec % 3600) / 60);
+            const totS = totalTrackedSec % 60;
+            dispTotalTracked.textContent = `${totH}h ${totM}m ${totS}s`;
+
+            const today = weekDays[selectedDayIndex];
+            dispTodayLogged.textContent = `${today.h}h ${today.m}m ${today.s}s`;
+            dispTodayLabel.textContent = `${today.label} Active Column`;
+
+            const remSec = Math.max(0, TARGET_DAILY_SEC - today.sec);
+            const remH = Math.floor(remSec / 3600);
+            const remM = Math.floor((remSec % 3600) / 60);
+            const remS = remSec % 60;
+            dispRemaining.textContent = `${remH}h ${remM}m ${remS}s`;
+
+            const now = new Date();
+            targetTimestamp = new Date(now.getTime() + remSec * 1000);
+            dispStopTime.textContent = targetTimestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            // Table Render
+            weeklyTableBody.innerHTML = '';
+            let runningCumulative = 0;
+
+            weekDays.forEach((day, idx) => {
+                runningCumulative += day.sec;
+                const deltaSec = day.sec - TARGET_DAILY_SEC;
+
+                let deltaStr = "Upcoming";
+                let deltaColor = "text-slate-500";
+                let statusBadge = `<span class="text-slate-500">Pending</span>`;
+
+                if (day.sec > 0) {
+                    const absDelta = Math.abs(deltaSec);
+                    const dh = Math.floor(absDelta / 3600);
+                    const dm = Math.floor((absDelta % 3600) / 60);
+                    const ds = absDelta % 60;
+                    const sign = deltaSec >= 0 ? '+' : '-';
+                    deltaStr = `${sign}${dh}h ${dm}m ${ds}s`;
+                    deltaColor = deltaSec >= 0 ? 'text-emerald-400' : 'text-amber-400';
+                    statusBadge = `<span class="text-emerald-400 font-semibold">✔ Completed</span>`;
+                }
+
+                const isCurrent = idx === selectedDayIndex;
+                const tr = document.createElement('tr');
+                tr.className = `${isCurrent ? 'bg-emerald-950/30 border-l-2 border-emerald-400' : 'hover:bg-slate-900/60'} transition cursor-pointer`;
+                tr.onclick = () => {
+                    selectedDayIndex = idx;
+                    renderAll();
+                };
+
+                const cumH = Math.floor(runningCumulative / 3600);
+                const cumM = Math.floor((runningCumulative % 3600) / 60);
+                const cumS = runningCumulative % 60;
+
+                tr.innerHTML = `
+          <td class="py-3 px-3 font-bold ${isCurrent ? 'text-emerald-300' : 'text-white'}">
+            ${isCurrent ? '● ' : ''}${day.label}
+          </td>
+          <td class="py-3 px-3 text-slate-200">${day.h}h ${String(day.m).padStart(2, '0')}m ${String(day.s).padStart(2, '0')}s</td>
+          <td class="py-3 px-3 ${deltaColor} font-semibold">${deltaStr}</td>
+          <td class="py-3 px-3 text-slate-300">${cumH}h ${String(cumM).padStart(2, '0')}m ${String(cumS).padStart(2, '0')}s</td>
+          <td class="py-3 px-3 text-slate-500">${(idx + 1) * 8}h 00m</td>
+          <td class="py-3 px-3 text-right">${statusBadge}</td>
+        `;
+                weeklyTableBody.appendChild(tr);
+            });
+
+            alarmDismissed = false;
+            stopAlarm();
+            startCountdown();
+        }
+
+        function startCountdown() {
+            if (countdownInterval) clearInterval(countdownInterval);
+
+            function tick() {
+                const now = new Date();
+                const diffMs = targetTimestamp - now;
+
+                if (diffMs <= 0) {
+                    countdown.textContent = "00:00:00";
+                    countdown.classList.remove('text-white');
+                    countdown.classList.add('text-emerald-400');
+                    clearInterval(countdownInterval);
+                    if (!alarmDismissed) triggerAlarm();
+                    return;
+                }
+
+                const sec = Math.floor(diffMs / 1000);
+                const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+                const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+                const s = String(sec % 60).padStart(2, '0');
+                countdown.textContent = `${h}:${m}:${s}`;
+            }
+
+            tick();
+            countdownInterval = setInterval(tick, 1000);
+        }
+
+        function triggerAlarm() {
+            alarmBanner.classList.remove('hidden');
+            playBeep();
+            alarmInterval = setInterval(playBeep, 2000);
+        }
+
+        function stopAlarm() {
+            alarmDismissed = true;
+            alarmBanner.classList.add('hidden');
+            if (alarmInterval) {
+                clearInterval(alarmInterval);
+                alarmInterval = null;
+            }
+        }
+
+        // Offset Buttons
+        function adjustRemaining(seconds) {
+            if (!targetTimestamp) return;
+            targetTimestamp = new Date(targetTimestamp.getTime() + seconds * 1000);
+            dispStopTime.textContent = targetTimestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        document.getElementById('adjustMinus5').addEventListener('click', () => adjustRemaining(-300));
+        document.getElementById('adjustMinus1').addEventListener('click', () => adjustRemaining(-60));
+        document.getElementById('adjustPlus1').addEventListener('click', () => adjustRemaining(60));
+        document.getElementById('adjustPlus5').addEventListener('click', () => adjustRemaining(300));
+
+        document.getElementById('dismissBtn').addEventListener('click', stopAlarm);
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            stopAlarm();
+            if (countdownInterval) clearInterval(countdownInterval);
+            countdown.textContent = "00:00:00";
+        });
+
+        document.getElementById('manBtn').addEventListener('click', () => {
+            const h = parseInt(document.getElementById('manH').value || 0, 10);
+            const m = parseInt(document.getElementById('manM').value || 0, 10);
+            const s = parseInt(document.getElementById('manS').value || 0, 10);
+            weekDays[selectedDayIndex].h = h;
+            weekDays[selectedDayIndex].m = m;
+            weekDays[selectedDayIndex].s = s;
+            weekDays[selectedDayIndex].sec = h * 3600 + m * 60 + s;
+            totalTrackedSec = weekDays.reduce((acc, d) => acc + d.sec, 0);
+            renderAll();
+        });
+    </script>
+</body>
+
+</html>
