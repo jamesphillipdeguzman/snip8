@@ -9,6 +9,14 @@
         let selectedDayIndex = 0;
         let totalTrackedSec = 0;
 
+        // Live progress tracking baseline state
+        let timerStartTime = null;
+        let timerCompleted = false;
+        let completedElapsedSec = 0;
+        let baseTodaySec = 0;
+        let baseTotalTrackedSec = 0;
+        const STORAGE_KEY_LIVE_INCREMENT = 'snip8_live_increment';
+
         // Elements
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
@@ -23,6 +31,7 @@
         const weeklyTableBody = document.getElementById('weeklyTableBody');
         const alarmBanner = document.getElementById('alarmBanner');
         const rawOcrText = document.getElementById('rawOcrText');
+        const liveIncrementToggle = document.getElementById('liveIncrementToggle');
 
         // Web Audio Chime (Triple Bell Pattern)
         function playBeep() {
@@ -278,25 +287,71 @@
             renderAll();
         }
 
+        function formatHms(seconds) {
+            const s = Math.max(0, Math.floor(seconds));
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            return `${h}h ${m}m ${sec}s`;
+        }
+
+        function getElapsedSeconds() {
+            if (!timerStartTime) return 0;
+            return Math.max(0, Math.floor((Date.now() - timerStartTime) / 1000));
+        }
+
+        function updateLoggedDisplays() {
+            const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
+            let elapsed = 0;
+
+            if (isLiveEnabled && timerStartTime) {
+                if (timerCompleted) {
+                    elapsed = completedElapsedSec;
+                } else {
+                    elapsed = getElapsedSeconds();
+                }
+            }
+
+            const currentTodaySec = baseTodaySec + elapsed;
+            const currentTotalSec = baseTotalTrackedSec + elapsed;
+
+            dispTodayLogged.textContent = formatHms(currentTodaySec);
+            dispTotalTracked.textContent = formatHms(currentTotalSec);
+
+            const remSec = Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
+            dispRemaining.textContent = formatHms(remSec);
+
+            const today = detectedDays[selectedDayIndex] || { label: 'Active Day' };
+            const isRunningLive = isLiveEnabled && countdownInterval !== null;
+            dispTodayLabel.textContent = `${today.label} Active Column${isRunningLive ? ' • Live' : ''}`;
+        }
+
+        function initLiveIncrementToggle() {
+            if (!liveIncrementToggle) return;
+            const saved = localStorage.getItem(STORAGE_KEY_LIVE_INCREMENT);
+            if (saved !== null) {
+                liveIncrementToggle.checked = saved === 'true';
+            } else {
+                liveIncrementToggle.checked = true;
+            }
+
+            liveIncrementToggle.addEventListener('change', () => {
+                localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, liveIncrementToggle.checked);
+                updateLoggedDisplays();
+            });
+        }
+
         function renderAll() {
             dashboard.classList.remove('hidden');
 
-            // Top Cards
-            const totH = Math.floor(totalTrackedSec / 3600);
-            const totM = Math.floor((totalTrackedSec % 3600) / 60);
-            const totS = totalTrackedSec % 60;
-            dispTotalTracked.textContent = `${totH}h ${totM}m ${totS}s`;
-
             const today = detectedDays[selectedDayIndex] || { label: 'Active Day', h: 0, m: 0, s: 0, sec: 0 };
-            dispTodayLogged.textContent = `${today.h}h ${today.m}m ${today.s}s`;
-            dispTodayLabel.textContent = `${today.label} Active Column`;
+            baseTodaySec = today.sec;
+            baseTotalTrackedSec = totalTrackedSec;
+            timerStartTime = Date.now();
+            timerCompleted = false;
+            completedElapsedSec = 0;
 
             const remSec = Math.max(0, TARGET_DAILY_SEC - today.sec);
-            const remH = Math.floor(remSec / 3600);
-            const remM = Math.floor((remSec % 3600) / 60);
-            const remS = remSec % 60;
-            dispRemaining.textContent = `${remH}h ${remM}m ${remS}s`;
-
             const now = new Date();
             targetTimestamp = new Date(now.getTime() + remSec * 1000);
             dispStopTime.textContent = targetTimestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -348,6 +403,8 @@
                 weeklyTableBody.appendChild(tr);
             });
 
+            updateLoggedDisplays();
+
             alarmDismissed = false;
             stopAlarm();
             startCountdown();
@@ -365,6 +422,10 @@
                     countdown.classList.remove('text-white');
                     countdown.classList.add('text-emerald-400');
                     clearInterval(countdownInterval);
+                    countdownInterval = null;
+                    timerCompleted = true;
+                    completedElapsedSec = getElapsedSeconds();
+                    updateLoggedDisplays();
                     if (!alarmDismissed) triggerAlarm();
                     return;
                 }
@@ -374,6 +435,8 @@
                 const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
                 const s = String(sec % 60).padStart(2, '0');
                 countdown.textContent = `${h}:${m}:${s}`;
+
+                updateLoggedDisplays();
             }
 
             tick();
@@ -400,6 +463,10 @@
             if (!targetTimestamp) return;
             targetTimestamp = new Date(targetTimestamp.getTime() + seconds * 1000);
             dispStopTime.textContent = targetTimestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            if (timerCompleted && (targetTimestamp - new Date()) > 0) {
+                timerCompleted = false;
+                startCountdown();
+            }
         }
 
         document.getElementById('adjustMinus5').addEventListener('click', () => adjustRemaining(-300));
@@ -411,7 +478,12 @@
         document.getElementById('resetBtn').addEventListener('click', () => {
             stopAlarm();
             if (countdownInterval) clearInterval(countdownInterval);
+            countdownInterval = null;
+            timerStartTime = null;
+            timerCompleted = false;
+            completedElapsedSec = 0;
             countdown.textContent = "00:00:00";
+            updateLoggedDisplays();
         });
 
         document.getElementById('manBtn').addEventListener('click', () => {
@@ -430,3 +502,6 @@
             totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
             renderAll();
         });
+
+        // Initialize user preferences
+        initLiveIncrementToggle();
