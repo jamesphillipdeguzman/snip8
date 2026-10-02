@@ -410,32 +410,48 @@
         function parseText(rawText) {
             if (!rawText) return;
 
-            // 1. Total time tracked extraction (top summary)
-            const totalRegex = /Total\s*(?:time|tire|tine)?[\s\S]{0,30}?(\d{1,2})\s*(?:hr|h)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/i;
-            const totalMatch = rawText.match(totalRegex);
+            // 1. Normalization
+            let cleaned = rawText
+                .replace(/[oOQ]([0-9])/g, '0$1')
+                .replace(/([0-9])[oOQ]/g, '$10')
+                .replace(/\b(?:racked|racksd|tracksd)\b/gi, 'tracked')
+                .replace(/\btine\b/gi, 'time')
+                .replace(/\bThr\s*,/gi, '1 hr,')
+                .replace(/\bThr\b/gi, '1 hr')
+                // Normalize any OCR misreads of 00 hr (G0, GO, g0, go, 60, CO, C0, OO, O0)
+                .replace(/\b[Gg6COo0][0oOQ]\s*(?:hr|h)/gi, '00 hr')
+                .replace(/\b[Gg]\s*(?:hr|h)/gi, '00 hr')
+                .replace(/\bG0\b/gi, '00')
+                .replace(/rnin|min|mln/gi, 'min')
+                .replace(/ser|see|soc|soe|sec/gi, 'sec')
+                // Fix Tesseract common misread: "00 hr 20 min 00 sec" for empty columns
+                .replace(/\b0{1,2}\s*(?:hr|h)\s*,?\s*20\s*(?:min|m)\s*,?\s*0{1,2}\s*(?:sec|s)?/gi, '00 hr 00 min 00 sec')
+                .replace(/\b0{1,2}\s*(?:hr|h)\s*,?\s*20\s*(?:min|m)\s*,?\s*0\b/gi, '00 hr 00 min 00 sec');
+
+            // 2. Total time tracked extraction (top summary)
+            const totalRegex = /Total\s*(?:time|tire|tine)?[\s\S]{0,35}?(\d{1,2})\s*(?:hr|h|br)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/i;
+            const totalMatch = cleaned.match(totalRegex);
             totalTrackedSec = 0;
             if (totalMatch) {
                 totalTrackedSec = parseInt(totalMatch[1], 10) * 3600 + parseInt(totalMatch[2], 10) * 60 + parseInt(totalMatch[3], 10);
             }
 
-            // 2. Normalization
-            let cleaned = rawText
-                .replace(/[oOQ]([0-9])/g, '0$1')
-                .replace(/([0-9])[oOQ]/g, '$10')
-                .replace(/\b(?:racked|racksd|tracksd)\b/gi, 'tracked')
-                .replace(/\bThr\b/gi, '1 hr')
-                .replace(/\bG0\b/g, '00')
-                .replace(/rnin|min|mln/gi, 'min')
-                .replace(/ser|see|soc|soe|sec/gi, 'sec');
+            // 3. Remove all lines containing "total" so it doesn't get captured in columns
+            const lines = cleaned.split('\n').filter(line => !/total/i.test(line)).join('\n');
 
-            // 3. Remove the line with "Total time tracked" so it doesn't get captured in columns
-            const lines = cleaned.split('\n').filter(line => !/total\s*time/i.test(line)).join('\n');
+            // 4. Sanitize timezone markers, time ranges, and lone axis digits/offsets before day durations
+            let textForColumns = lines
+                .replace(/\bGMT\b/gi, ' ')
+                .replace(/\b\d{1,2}\s*(?:AM|PM)\b/gi, ' ') // e.g. 10 AM, 12 AM
+                .replace(/(?:^|\s)[+-]?\d{1,2}(?:\s+[a-z])?(?=\s+(?:00|\d{1,2}\s*hr))/gim, ' ')
+                .replace(/(?:^|\s)[+-]?\d{1,2}(?=\s+[+-]?\d{1,2}\s+(?:00|\d{1,2}\s*hr))/gim, ' ')
+                .replace(/(?:^|\s)[+-]?\d{1,2}(?=\s+(?:00|\d{1,2}\s*hr))/gim, ' ');
 
-            // 4. Extract Date Headers (e.g. Thu 10/1, Fri 10/2)
+            // 5. Extract Date Headers (e.g. Thu 10/1, Fri 10/2)
             const dayHeaderRegex = /\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Man)\b[\s\S]{0,4}?(\d{1,2}[\/\w]+)/gi;
             const daysFound = [];
             let hm;
-            while ((hm = dayHeaderRegex.exec(lines)) !== null) {
+            while ((hm = dayHeaderRegex.exec(textForColumns)) !== null) {
                 let dayName = hm[1];
                 if (/^man$/i.test(dayName)) dayName = 'Mon';
                 const datePart = hm[2].replace(/([0-9])[A|Il\\]([0-9])/g, '$1/$2');
@@ -446,20 +462,27 @@
             if (daysFound.length === 0) {
                 const standaloneHeaderRegex = /\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/gi;
                 let shm;
-                while ((shm = standaloneHeaderRegex.exec(lines)) !== null) {
+                while ((shm = standaloneHeaderRegex.exec(textForColumns)) !== null) {
                     daysFound.push({ label: shm[1], dayName: shm[1] });
                 }
             }
 
-            // 5. Extract Column Durations STRICTLY (HH hr MM min SS sec)
-            // This avoids catching lone digits like "8" or "-6" from GMT
-            const durRegex = /(\d{1,2})\s*(?:hr|h)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/gi;
+            // 6. Extract Column Durations (HH hr MM min SS sec or headless hr)
+            const durRegex = /(?:(\d{1,2})\s*(?:hr|h)\s*,?\s*)?(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/gi;
             const parsedDurations = [];
             let dm;
-            while ((dm = durRegex.exec(lines)) !== null) {
-                let h = parseInt(dm[1], 10);
+            while ((dm = durRegex.exec(textForColumns)) !== null) {
+                let h = dm[1] !== undefined ? parseInt(dm[1], 10) : 0;
                 let m = parseInt(dm[2], 10);
                 let s = parseInt(dm[3], 10);
+
+                // If hour was headless (e.g. "hr 41 min 36 sec"), inspect preceding token
+                if (dm[1] === undefined) {
+                    const preText = textForColumns.substring(Math.max(0, dm.index - 8), dm.index);
+                    if (/\bhr\s*,?\s*$/i.test(preText)) {
+                        h = totalTrackedSec > 0 ? Math.max(1, Math.floor(totalTrackedSec / 3600)) : 1;
+                    }
+                }
 
                 // Fix Tesseract common misread: "00 hr 20 min 00 sec" for "00 hr 00 min 00 sec"
                 if (h === 0 && m === 20 && s === 0) {
@@ -481,7 +504,7 @@
                 return;
             }
 
-            // 6. Map parsed columns
+            // 7. Map parsed columns
             const count = Math.max(daysFound.length, parsedDurations.length);
             detectedDays = [];
             for (let i = 0; i < count; i++) {
@@ -497,7 +520,7 @@
                 });
             }
 
-            // 7. Smart Active Day Selection:
+            // 8. Smart Active Day Selection:
             // First priority: Match today's day of week (e.g. "Fri")
             const now = new Date();
             const todayName = now.toLocaleDateString('en-US', { weekday: 'short' }); // "Fri"
@@ -514,6 +537,23 @@
             }
 
             selectedDayIndex = matchedIndex >= 0 ? matchedIndex : 0;
+
+            // 9. Reconcile Active Day with Total Tracked Time
+            // When totalTrackedSec is read from the pay period summary (e.g. 2 hr, 54 min, 10 sec):
+            // If today is the active day and all other columns are 0, reconcile the active day's duration
+            // with the pay period total (correcting OCR misreads like '04 min' for '54 min' or '0h 0m 0s')
+            if (totalTrackedSec > 0 && detectedDays[selectedDayIndex]) {
+                const otherDaysSec = detectedDays.reduce((acc, d, idx) => idx === selectedDayIndex ? acc : acc + d.sec, 0);
+                if (otherDaysSec === 0) {
+                    const totH = Math.floor(totalTrackedSec / 3600);
+                    const totM = Math.floor((totalTrackedSec % 3600) / 60);
+                    const totS = totalTrackedSec % 60;
+                    detectedDays[selectedDayIndex].h = totH;
+                    detectedDays[selectedDayIndex].m = totM;
+                    detectedDays[selectedDayIndex].s = totS;
+                    detectedDays[selectedDayIndex].sec = totalTrackedSec;
+                }
+            }
 
             if (totalTrackedSec === 0) {
                 totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
