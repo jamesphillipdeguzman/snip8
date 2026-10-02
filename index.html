@@ -372,8 +372,12 @@
             const ctx = canvas.getContext('2d');
             let sx = 0, sy = 0, sw = img.width, sh = img.height;
 
-            // Crop the header band where dates and hours reside if full desktop screenshot
-            if (img.height > 600) {
+            // Check aspect ratio: only crop the header band if this is a wide desktop screenshot.
+            // Tight/narrow crops (e.g. single day column with width <= 900 or aspect ratio < 1.2) are kept 100% intact.
+            const aspectRatio = img.width / img.height;
+            const isFullDesktopView = img.width > 900 && img.height > 600 && aspectRatio >= 1.2;
+
+            if (isFullDesktopView) {
                 sy = Math.floor(img.height * 0.08);
                 sh = Math.floor(img.height * 0.20);
             }
@@ -383,12 +387,14 @@
             ctx.imageSmoothingEnabled = false;
             ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
-            // Contrast enhancement: convert faint gray font to pure dark pixels
+            // Contrast enhancement: convert faint gray font to pure dark pixels.
+            // Use safe cutoff (200 for tight crops) to preserve thin or faint text in single-column snips.
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const data = imgData.data;
+            const threshold = isFullDesktopView ? 185 : 200;
             for (let i = 0; i < data.length; i += 4) {
                 const brightness = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-                if (brightness < 185) {
+                if (brightness < threshold) {
                     data[i] = 0; data[i + 1] = 0; data[i + 2] = 0;
                 } else {
                     data[i] = 255; data[i + 1] = 255; data[i + 2] = 255;
