@@ -1,8 +1,16 @@
         const TARGET_DAILY_SEC = 8 * 3600;
         let countdownInterval = null;
+        let deadlineTimeout = null;
         let alarmInterval = null;
         let targetTimestamp = null;
         let alarmDismissed = false;
+        let alarmActive = false;
+        let alarmNotification = null;
+        let titleFlashInterval = null;
+        const BASE_TITLE = document.title;
+        const ALARM_TITLE = '⏰ STOP TIMER — 8h reached!';
+        // On reload after the target already passed, only re-ring if we're still inside the 5m grace window
+        const ALARM_RESTORE_GRACE_MS = 5 * 60 * 1000;
 
         // Dynamic days model (populated directly via OCR)
         let detectedDays = [];
@@ -16,6 +24,16 @@
         let baseTodaySec = 0;
         let baseTotalTrackedSec = 0;
         const STORAGE_KEY_LIVE_INCREMENT = 'snip8_live_increment';
+
+        // Session persistence keys (localStorage, JSON-serialized)
+        const SESSION_KEYS = {
+            detectedDays: 'snip8_detectedDays',
+            selectedDayIndex: 'snip8_selectedDayIndex',
+            targetTimestamp: 'snip8_targetTimestamp',
+            lastUpdated: 'snip8_lastUpdated',
+            totalTrackedSec: 'snip8_totalTrackedSec',
+            alarmAck: 'snip8_alarmAckTarget'
+        };
 
         // Elements
         const dropZone = document.getElementById('dropZone');
@@ -32,37 +50,109 @@
         const alarmBanner = document.getElementById('alarmBanner');
         const rawOcrText = document.getElementById('rawOcrText');
         const liveIncrementToggle = document.getElementById('liveIncrementToggle');
+        const dismissBtn = document.getElementById('dismissBtn');
+        const sessionMeta = document.getElementById('sessionMeta');
+
+        // ===== Web Audio (single shared, lazily-created context) =====
+        // Browsers start AudioContexts "suspended" until a user gesture, so we create one context
+        // and resume it on every gesture/alarm instead of spawning a new (blocked) context per beep.
+        let audioCtx = null;
+
+        function getAudioContext() {
+            if (!audioCtx) {
+                const AC = window.AudioContext || window.webkitAudioContext;
+                if (!AC) return null;
+                audioCtx = new AC();
+            }
+            return audioCtx;
+        }
+
+        async function ensureAudioRunning() {
+            const ctx = getAudioContext();
+            if (!ctx) return null;
+            if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+                try { await ctx.resume(); } catch (e) { /* still locked until a user gesture */ }
+            }
+            return ctx;
+        }
 
         // Web Audio Chime (Triple Bell Pattern)
-        function playBeep() {
+        async function playBeep() {
             try {
-                const AudioContext = window.AudioContext || window.webkitAudioContext;
-                const ctx = new AudioContext();
+                const ctx = await ensureAudioRunning();
+                if (!ctx || ctx.state !== 'running') {
+                    console.warn('snip8: audio is locked until you click or press a key on the page.');
+                    return false;
+                }
 
+                const start = ctx.currentTime + 0.05;
                 const notes = [587.33, 739.99, 880]; // D5, F#5, A5
                 notes.forEach((freq, idx) => {
+                    const t = start + idx * 0.15;
                     const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
 
                     osc.type = 'triangle';
-                    osc.frequency.setValueAtTime(freq, ctx.currentTime + idx * 0.15);
+                    osc.frequency.setValueAtTime(freq, t);
 
-                    gain.gain.setValueAtTime(0, ctx.currentTime + idx * 0.15);
-                    gain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + idx * 0.15 + 0.02);
-                    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.15 + 0.35);
+                    gain.gain.setValueAtTime(0, t);
+                    gain.gain.linearRampToValueAtTime(0.3, t + 0.02);
+                    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
 
                     osc.connect(gain);
                     gain.connect(ctx.destination);
 
-                    osc.start(ctx.currentTime + idx * 0.15);
-                    osc.stop(ctx.currentTime + idx * 0.15 + 0.4);
+                    osc.start(t);
+                    osc.stop(t + 0.4);
+                    osc.onended = () => { osc.disconnect(); gain.disconnect(); };
                 });
+                return true;
             } catch (e) {
                 console.error("Audio error", e);
+                return false;
             }
         }
 
-        document.getElementById('testAudioBtn').addEventListener('click', playBeep);
+        // Unlock audio on any user gesture so the alarm can sound later without interaction
+        ['pointerdown', 'keydown', 'touchstart'].forEach(evt =>
+            window.addEventListener(evt, () => { ensureAudioRunning(); }, { passive: true })
+        );
+
+        // ===== Desktop Notifications =====
+        let notificationPermissionAsked = false;
+
+        function requestNotificationPermission() {
+            if (!('Notification' in window) || Notification.permission !== 'default' || notificationPermissionAsked) return;
+            notificationPermissionAsked = true;
+            try {
+                const p = Notification.requestPermission();
+                if (p && typeof p.catch === 'function') p.catch(() => { });
+            } catch (e) { /* unsupported */ }
+        }
+
+        function showAlarmNotification() {
+            if (!('Notification' in window) || Notification.permission !== 'granted') return;
+            try {
+                alarmNotification = new Notification('⏰ snip8 — 8 hours reached', {
+                    body: 'Stop your timer in Springboard / Clockify now. The 5-minute grace period has started.',
+                    tag: 'snip8-alarm',
+                    requireInteraction: true,
+                    icon: 'images/favicon.ico'
+                });
+                alarmNotification.onclick = () => {
+                    window.focus();
+                    alarmNotification && alarmNotification.close();
+                };
+            } catch (e) {
+                // e.g. Android Chrome requires a Service Worker for notifications
+                console.warn('snip8: notification failed', e);
+            }
+        }
+
+        document.getElementById('testAudioBtn').addEventListener('click', () => {
+            requestNotificationPermission();
+            playBeep();
+        });
 
         dropZone.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', (e) => {
@@ -80,6 +170,10 @@
         });
 
         async function processFile(file) {
+            // Called from a paste/upload gesture: good moment to unlock audio + ask for notifications
+            ensureAudioRunning();
+            requestNotificationPermission();
+
             statusContainer.classList.remove('hidden');
             statusContainer.textContent = "Enhancing contrast and running OCR on timesheet...";
 
@@ -341,20 +435,27 @@
             });
         }
 
-        function renderAll() {
+        // options.restore = { startTime, target, alarmDismissed } when hydrating from localStorage
+        function renderAll(options = {}) {
+            const restore = options.restore || null;
             dashboard.classList.remove('hidden');
 
             const today = detectedDays[selectedDayIndex] || { label: 'Active Day', h: 0, m: 0, s: 0, sec: 0 };
             baseTodaySec = today.sec;
             baseTotalTrackedSec = totalTrackedSec;
-            timerStartTime = Date.now();
             timerCompleted = false;
             completedElapsedSec = 0;
 
-            const remSec = Math.max(0, TARGET_DAILY_SEC - today.sec);
-            const now = new Date();
-            targetTimestamp = new Date(now.getTime() + remSec * 1000);
-            dispStopTime.textContent = targetTimestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            if (restore) {
+                // Keep the original baseline so live increment + countdown continue seamlessly after refresh
+                timerStartTime = restore.startTime;
+                targetTimestamp = new Date(restore.target.getTime());
+            } else {
+                timerStartTime = Date.now();
+                const remSec = Math.max(0, TARGET_DAILY_SEC - today.sec);
+                targetTimestamp = new Date(timerStartTime + remSec * 1000);
+            }
+            updateStopTimeDisplay();
 
             // Table Render
             weeklyTableBody.innerHTML = '';
@@ -405,68 +506,159 @@
 
             updateLoggedDisplays();
 
-            alarmDismissed = false;
-            stopAlarm();
+            // Re-arm for the new target. Uses silenceAlarm() rather than stopAlarm(): the old code called
+            // stopAlarm() here, which set alarmDismissed = true and prevented the alarm from ever firing.
+            silenceAlarm();
+            alarmDismissed = restore ? !!restore.alarmDismissed : false;
+
+            if (restore) {
+                updateSessionMeta('restored');
+            } else {
+                updateSessionMeta(saveSession() ? 'saved' : 'error');
+            }
+
             startCountdown();
         }
 
-        function startCountdown() {
-            if (countdownInterval) clearInterval(countdownInterval);
-
-            function tick() {
-                const now = new Date();
-                const diffMs = targetTimestamp - now;
-
-                if (diffMs <= 0) {
-                    countdown.textContent = "00:00:00";
-                    countdown.classList.remove('text-white');
-                    countdown.classList.add('text-emerald-400');
-                    clearInterval(countdownInterval);
-                    countdownInterval = null;
-                    timerCompleted = true;
-                    completedElapsedSec = getElapsedSeconds();
-                    updateLoggedDisplays();
-                    if (!alarmDismissed) triggerAlarm();
-                    return;
-                }
-
-                const sec = Math.floor(diffMs / 1000);
-                const h = String(Math.floor(sec / 3600)).padStart(2, '0');
-                const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
-                const s = String(sec % 60).padStart(2, '0');
-                countdown.textContent = `${h}:${m}:${s}`;
-
-                updateLoggedDisplays();
-            }
-
-            tick();
-            countdownInterval = setInterval(tick, 1000);
+        function formatClock(date) {
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         }
 
-        function triggerAlarm() {
+        function updateStopTimeDisplay() {
+            dispStopTime.textContent = targetTimestamp ? formatClock(targetTimestamp) : '--';
+        }
+
+        function clearCountdownTimers() {
+            if (countdownInterval) clearInterval(countdownInterval);
+            countdownInterval = null;
+            if (deadlineTimeout) clearTimeout(deadlineTimeout);
+            deadlineTimeout = null;
+        }
+
+        function tickCountdown() {
+            if (!targetTimestamp) return;
+            const diffMs = targetTimestamp - Date.now();
+
+            if (diffMs <= 0) {
+                countdown.textContent = "00:00:00";
+                countdown.classList.remove('text-white');
+                countdown.classList.add('text-emerald-400');
+                clearCountdownTimers();
+                timerCompleted = true;
+                // Freeze at the moment the target was hit (not "now") so throttled background ticks
+                // or a late page reload don't over-count logged time.
+                completedElapsedSec = timerStartTime
+                    ? Math.max(0, Math.round((targetTimestamp - timerStartTime) / 1000))
+                    : 0;
+                updateLoggedDisplays();
+                if (!alarmDismissed) triggerAlarm();
+                return;
+            }
+
+            const sec = Math.floor(diffMs / 1000);
+            const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+            const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+            const s = String(sec % 60).padStart(2, '0');
+            countdown.textContent = `${h}:${m}:${s}`;
+
+            updateLoggedDisplays();
+        }
+
+        function startCountdown() {
+            clearCountdownTimers();
+            if (!targetTimestamp) return;
+            countdown.classList.remove('text-emerald-400');
+            countdown.classList.add('text-white');
+
+            countdownInterval = setInterval(tickCountdown, 1000);
+            // One-shot deadline timer: background tabs throttle repeating intervals (down to ~1/min),
+            // while a single non-chained timeout is much more likely to fire on time.
+            const remainingMs = targetTimestamp - Date.now();
+            if (remainingMs > 0) deadlineTimeout = setTimeout(tickCountdown, remainingMs + 50);
+            tickCountdown();
+        }
+
+        // Catch up immediately when the tab becomes visible again
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && countdownInterval) tickCountdown();
+        });
+
+        async function triggerAlarm() {
+            if (alarmActive) return;
+            alarmActive = true;
             alarmBanner.classList.remove('hidden');
+            try { dismissBtn.focus({ preventScroll: true }); } catch (e) { }
+            startTitleFlash();
+            showAlarmNotification();
+
+            const ctx = getAudioContext();
+            if (ctx && ctx.state === 'suspended') {
+                try { await ctx.resume(); } catch (e) { /* locked until next gesture; notification still fires */ }
+            }
+            if (!alarmActive) return; // dismissed while awaiting resume
+
             playBeep();
+            if (alarmInterval) clearInterval(alarmInterval);
             alarmInterval = setInterval(playBeep, 2000);
         }
 
-        function stopAlarm() {
-            alarmDismissed = true;
+        // Internal: silence everything without marking the alarm as user-acknowledged
+        function silenceAlarm() {
+            alarmActive = false;
             alarmBanner.classList.add('hidden');
             if (alarmInterval) {
                 clearInterval(alarmInterval);
                 alarmInterval = null;
             }
+            stopTitleFlash();
+            if (alarmNotification) {
+                try { alarmNotification.close(); } catch (e) { }
+                alarmNotification = null;
+            }
+        }
+
+        // User dismissal (button, banner click, Esc). No-op when nothing is ringing, so a stray Esc
+        // before 00:00:00 can't suppress the upcoming alarm.
+        function stopAlarm() {
+            if (!alarmActive) return;
+            alarmDismissed = true;
+            silenceAlarm();
+            if (targetTimestamp) {
+                try { writeJSON(SESSION_KEYS.alarmAck, targetTimestamp.toISOString()); } catch (e) { }
+            }
+        }
+
+        function startTitleFlash() {
+            stopTitleFlash();
+            let on = true;
+            document.title = ALARM_TITLE;
+            titleFlashInterval = setInterval(() => {
+                on = !on;
+                document.title = on ? ALARM_TITLE : BASE_TITLE;
+            }, 1000);
+        }
+
+        function stopTitleFlash() {
+            if (titleFlashInterval) clearInterval(titleFlashInterval);
+            titleFlashInterval = null;
+            document.title = BASE_TITLE;
         }
 
         // Offset Buttons
         function adjustRemaining(seconds) {
             if (!targetTimestamp) return;
             targetTimestamp = new Date(targetTimestamp.getTime() + seconds * 1000);
-            dispStopTime.textContent = targetTimestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            updateStopTimeDisplay();
             if (timerCompleted && (targetTimestamp - new Date()) > 0) {
+                // Pushed the target back into the future: silence and re-arm
+                silenceAlarm();
+                alarmDismissed = false;
                 timerCompleted = false;
                 startCountdown();
+            } else if (countdownInterval) {
+                startCountdown(); // reschedule the precise deadline timer
             }
+            if (detectedDays.length) updateSessionMeta(saveSession() ? 'saved' : 'error');
         }
 
         document.getElementById('adjustMinus5').addEventListener('click', () => adjustRemaining(-300));
@@ -474,19 +666,50 @@
         document.getElementById('adjustPlus1').addEventListener('click', () => adjustRemaining(60));
         document.getElementById('adjustPlus5').addEventListener('click', () => adjustRemaining(300));
 
-        document.getElementById('dismissBtn').addEventListener('click', stopAlarm);
+        // Clicking anywhere on the banner (including the Dismiss button, via bubbling) silences the alarm
+        alarmBanner.addEventListener('click', stopAlarm);
+        window.addEventListener('keydown', (e) => { if (e.key === 'Escape') stopAlarm(); });
+
         document.getElementById('resetBtn').addEventListener('click', () => {
-            stopAlarm();
-            if (countdownInterval) clearInterval(countdownInterval);
-            countdownInterval = null;
+            silenceAlarm();
+            clearCountdownTimers();
             timerStartTime = null;
             timerCompleted = false;
             completedElapsedSec = 0;
             countdown.textContent = "00:00:00";
+            countdown.classList.remove('text-emerald-400');
+            countdown.classList.add('text-white');
             updateLoggedDisplays();
         });
 
+        document.getElementById('clearSessionBtn').addEventListener('click', () => {
+            if (!confirm('Clear the saved timesheet session? You will need to paste a new screenshot.')) return;
+            clearSession();
+            silenceAlarm();
+            clearCountdownTimers();
+            detectedDays = [];
+            selectedDayIndex = 0;
+            totalTrackedSec = 0;
+            targetTimestamp = null;
+            timerStartTime = null;
+            timerCompleted = false;
+            completedElapsedSec = 0;
+            baseTodaySec = 0;
+            baseTotalTrackedSec = 0;
+            alarmDismissed = false;
+            weeklyTableBody.innerHTML = '';
+            countdown.textContent = "00:00:00";
+            countdown.classList.remove('text-emerald-400');
+            countdown.classList.add('text-white');
+            updateStopTimeDisplay();
+            fileInput.value = '';
+            rawOcrText.textContent = '(No image scanned yet)';
+            dashboard.classList.add('hidden');
+            updateSessionMeta('cleared');
+        });
+
         document.getElementById('manBtn').addEventListener('click', () => {
+            requestNotificationPermission();
             const h = parseInt(document.getElementById('manH').value || 0, 10);
             const m = parseInt(document.getElementById('manM').value || 0, 10);
             const s = parseInt(document.getElementById('manS').value || 0, 10);
@@ -503,5 +726,132 @@
             renderAll();
         });
 
-        // Initialize user preferences
-        initLiveIncrementToggle();
+        // ===== Session Persistence (localStorage) =====
+        function writeJSON(key, value) {
+            localStorage.setItem(key, JSON.stringify(value));
+        }
+
+        function readJSON(key) {
+            const raw = localStorage.getItem(key);
+            return raw === null ? null : JSON.parse(raw);
+        }
+
+        function saveSession() {
+            try {
+                writeJSON(SESSION_KEYS.detectedDays, detectedDays);
+                writeJSON(SESSION_KEYS.selectedDayIndex, selectedDayIndex);
+                writeJSON(SESSION_KEYS.targetTimestamp, targetTimestamp ? targetTimestamp.toISOString() : null);
+                // lastUpdated doubles as the live-increment baseline (when the screenshot/entry was processed)
+                writeJSON(SESSION_KEYS.lastUpdated, new Date(timerStartTime || Date.now()).toISOString());
+                writeJSON(SESSION_KEYS.totalTrackedSec, totalTrackedSec);
+                return true;
+            } catch (e) {
+                console.warn('snip8: could not save session', e);
+                return false;
+            }
+        }
+
+        function loadSession() {
+            try {
+                const days = readJSON(SESSION_KEYS.detectedDays);
+                if (!Array.isArray(days) || days.length === 0) return null;
+
+                const cleanDays = days.map((d, i) => {
+                    const h = Number(d && d.h) || 0;
+                    const m = Number(d && d.m) || 0;
+                    const s = Number(d && d.s) || 0;
+                    return {
+                        label: String((d && d.label) || `Day ${i + 1}`),
+                        dayName: String((d && d.dayName) || ''),
+                        h, m, s,
+                        sec: h * 3600 + m * 60 + s
+                    };
+                });
+
+                const targetRaw = readJSON(SESSION_KEYS.targetTimestamp);
+                const updatedRaw = readJSON(SESSION_KEYS.lastUpdated);
+                if (!targetRaw || !updatedRaw) return null;
+                const target = new Date(targetRaw);
+                const lastUpdated = new Date(updatedRaw);
+                if (isNaN(target.getTime()) || isNaN(lastUpdated.getTime())) return null;
+
+                let idx = parseInt(readJSON(SESSION_KEYS.selectedDayIndex), 10);
+                if (!Number.isInteger(idx) || idx < 0 || idx >= cleanDays.length) idx = 0;
+
+                let total = Number(readJSON(SESSION_KEYS.totalTrackedSec));
+                if (!Number.isFinite(total) || total < 0) total = cleanDays.reduce((acc, d) => acc + d.sec, 0);
+
+                return {
+                    detectedDays: cleanDays,
+                    selectedDayIndex: idx,
+                    targetTimestamp: target,
+                    lastUpdated,
+                    totalTrackedSec: total,
+                    alarmAckTarget: readJSON(SESSION_KEYS.alarmAck)
+                };
+            } catch (e) {
+                console.warn('snip8: could not load session', e);
+                return null;
+            }
+        }
+
+        function clearSession() {
+            try {
+                Object.values(SESSION_KEYS).forEach(k => localStorage.removeItem(k));
+            } catch (e) { /* storage unavailable */ }
+        }
+
+        // Same calendar day, or still upcoming (covers shifts that cross midnight)
+        function isWithinTodayWindow(target, now = new Date()) {
+            return target.toDateString() === now.toDateString() || target.getTime() > now.getTime();
+        }
+
+        function updateSessionMeta(state) {
+            if (!sessionMeta) return;
+            if (state === 'cleared') { sessionMeta.textContent = 'No saved session'; return; }
+            if (state === 'error') { sessionMeta.textContent = '⚠ Session not saved (storage unavailable)'; return; }
+            const when = timerStartTime ? formatClock(new Date(timerStartTime)) : '--';
+            sessionMeta.textContent = state === 'restored'
+                ? `↻ Restored session • last updated ${when}`
+                : `💾 Session saved • last updated ${when}`;
+        }
+
+        function hydrateSession() {
+            const session = loadSession();
+            if (!session) return false;
+
+            const now = new Date();
+            if (!isWithinTodayWindow(session.targetTimestamp, now)) {
+                clearSession(); // stale (previous day) — start fresh
+                return false;
+            }
+
+            detectedDays = session.detectedDays;
+            selectedDayIndex = session.selectedDayIndex;
+            totalTrackedSec = session.totalTrackedSec;
+
+            const expiredMs = now - session.targetTimestamp;
+            const acknowledged = session.alarmAckTarget === session.targetTimestamp.toISOString();
+
+            renderAll({
+                restore: {
+                    startTime: session.lastUpdated.getTime(),
+                    target: session.targetTimestamp,
+                    alarmDismissed: acknowledged || expiredMs > ALARM_RESTORE_GRACE_MS
+                }
+            });
+            rawOcrText.textContent = `(Session restored from ${session.lastUpdated.toLocaleString()} — paste a new screenshot to rescan.)`;
+            return true;
+        }
+
+        // Initialize user preferences, then restore any saved session
+        function init() {
+            initLiveIncrementToggle();
+            hydrateSession();
+        }
+
+        if (document.readyState === 'loading') {
+            window.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
