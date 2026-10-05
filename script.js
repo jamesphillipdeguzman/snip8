@@ -52,6 +52,15 @@
         const liveIncrementToggle = document.getElementById('liveIncrementToggle');
         const dismissBtn = document.getElementById('dismissBtn');
         const sessionMeta = document.getElementById('sessionMeta');
+        const syncMobileBtn = document.getElementById('syncMobileBtn');
+        const syncModal = document.getElementById('syncModal');
+        const syncModalClose = document.getElementById('syncModalClose');
+        const syncModalSummary = document.getElementById('syncModalSummary');
+        const syncQrCanvas = document.getElementById('syncQrCanvas');
+        const syncQrFallback = document.getElementById('syncQrFallback');
+        const syncLocalWarning = document.getElementById('syncLocalWarning');
+        const syncLinkInput = document.getElementById('syncLinkInput');
+        const copySyncLinkBtn = document.getElementById('copySyncLinkBtn');
 
         // ===== Web Audio (single shared, lazily-created context) =====
         // Browsers start AudioContexts "suspended" until a user gesture, so we create one context
@@ -389,6 +398,11 @@
             return `${h}h ${m}m ${sec}s`;
         }
 
+        // Day labels can now arrive via a shared URL, so never inject them as raw HTML
+        function escapeHtml(str) {
+            return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
         function getElapsedSeconds() {
             if (!timerStartTime) return 0;
             return Math.max(0, Math.floor((Date.now() - timerStartTime) / 1000));
@@ -494,7 +508,7 @@
 
                 tr.innerHTML = `
             <td class="py-3 px-3 font-bold ${isCurrent ? 'text-emerald-300' : 'text-white'}">
-                ${isCurrent ? '● ' : ''}${day.label}
+                ${isCurrent ? '● ' : ''}${escapeHtml(day.label)}
             </td>
             <td class="py-3 px-3 text-slate-200">${day.h}h ${String(day.m).padStart(2, '0')}m ${String(day.s).padStart(2, '0')}s</td>
             <td class="py-3 px-3 ${deltaColor} font-semibold">${deltaStr}</td>
@@ -517,6 +531,7 @@
                 updateSessionMeta(saveSession() ? 'saved' : 'error');
             }
 
+            updateSyncUrl();
             startCountdown();
         }
 
@@ -659,6 +674,7 @@
                 startCountdown(); // reschedule the precise deadline timer
             }
             if (detectedDays.length) updateSessionMeta(saveSession() ? 'saved' : 'error');
+            updateSyncUrl();
         }
 
         document.getElementById('adjustMinus5').addEventListener('click', () => adjustRemaining(-300));
@@ -706,6 +722,8 @@
             rawOcrText.textContent = '(No image scanned yet)';
             dashboard.classList.add('hidden');
             updateSessionMeta('cleared');
+            clearSyncUrl();
+            closeSyncModal();
         });
 
         document.getElementById('manBtn').addEventListener('click', () => {
@@ -811,6 +829,7 @@
             if (state === 'cleared') { sessionMeta.textContent = 'No saved session'; return; }
             if (state === 'error') { sessionMeta.textContent = '⚠ Session not saved (storage unavailable)'; return; }
             const when = timerStartTime ? formatClock(new Date(timerStartTime)) : '--';
+            if (state === 'synced') { sessionMeta.textContent = `📱 Synced from link • saved on this device`; return; }
             sessionMeta.textContent = state === 'restored'
                 ? `↻ Restored session • last updated ${when}`
                 : `💾 Session saved • last updated ${when}`;
@@ -844,10 +863,183 @@
             return true;
         }
 
-        // Initialize user preferences, then restore any saved session
+        // ===== Cross-Device Sync (URL params + QR, no backend) =====
+        // Link format: ?sync=<target epoch ms>&logged=<selected day logged sec>&label=<day label>
+        function getBaseUrl() {
+            return window.location.href.split(/[?#]/)[0];
+        }
+
+        function buildSyncUrl() {
+            if (!targetTimestamp) return null;
+            const today = detectedDays[selectedDayIndex];
+            const params = new URLSearchParams();
+            params.set('sync', String(targetTimestamp.getTime()));
+            params.set('logged', String(Math.max(0, Math.round(baseTodaySec))));
+            params.set('label', today ? today.label : 'Today');
+            return `${getBaseUrl()}?${params.toString()}`;
+        }
+
+        // replaceState (not pushState) so adjustments don't flood the back-button history
+        function updateSyncUrl() {
+            const url = buildSyncUrl();
+            if (!url) return;
+            try { history.replaceState(null, '', url); } catch (e) { /* e.g. sandboxed iframe */ }
+            if (syncModal && syncModal.open) renderSyncModal();
+        }
+
+        function clearSyncUrl() {
+            if (!window.location.search) return;
+            try { history.replaceState(null, '', getBaseUrl()); } catch (e) { }
+        }
+
+        function parseSyncParams() {
+            const params = new URLSearchParams(window.location.search);
+            if (!params.has('sync')) return null;
+            const targetMs = Number(params.get('sync'));
+            if (!Number.isFinite(targetMs) || targetMs <= 0) return null;
+            const target = new Date(targetMs);
+            if (isNaN(target.getTime())) return null;
+            const loggedRaw = Number(params.get('logged'));
+            const loggedSec = Number.isFinite(loggedRaw) ? Math.min(Math.max(0, Math.floor(loggedRaw)), 24 * 3600) : 0;
+            const label = (params.get('label') || '').trim().slice(0, 40) || 'Today';
+            return { target, loggedSec, label };
+        }
+
+        // Hydrate from a sync link (e.g. phone scanning the desktop QR). Returns true if handled.
+        function hydrateFromSyncLink() {
+            const sync = parseSyncParams();
+            if (!sync) return false;
+
+            const now = new Date();
+            if (!isWithinTodayWindow(sync.target, now)) {
+                clearSyncUrl(); // stale link from a previous day
+                return false;
+            }
+
+            // Same device reloading its own URL (or a phone refreshing after a sync/adjust):
+            // prefer the richer local session (full week table, exact live baseline).
+            const local = loadSession();
+            if (local && local.targetTimestamp.getTime() === sync.target.getTime()) return false;
+
+            const h = Math.floor(sync.loggedSec / 3600);
+            const m = Math.floor((sync.loggedSec % 3600) / 60);
+            const s = sync.loggedSec % 60;
+            detectedDays = [{ label: sync.label, dayName: '', h, m, s, sec: sync.loggedSec }];
+            selectedDayIndex = 0;
+            totalTrackedSec = sync.loggedSec;
+
+            // Reconstruct the live-increment baseline so logged time reaches 8h exactly at the target
+            const remainingAtStartMs = Math.max(0, TARGET_DAILY_SEC - sync.loggedSec) * 1000;
+            const startTime = Math.min(now.getTime(), sync.target.getTime() - remainingAtStartMs);
+
+            let ack = null;
+            try { ack = readJSON(SESSION_KEYS.alarmAck); } catch (e) { }
+            const expiredMs = now - sync.target;
+
+            renderAll({
+                restore: {
+                    startTime,
+                    target: sync.target,
+                    alarmDismissed: ack === sync.target.toISOString() || expiredMs > ALARM_RESTORE_GRACE_MS
+                }
+            });
+
+            // Persist on this device so a plain refresh (or reopening without the link) keeps the countdown
+            updateSessionMeta(saveSession() ? 'synced' : 'error');
+            rawOcrText.textContent = `(Countdown synced via link for "${sync.label}" — stop at ${formatClock(sync.target)}.)`;
+            return true;
+        }
+
+        function isLocalOnlyUrl() {
+            const host = window.location.hostname;
+            return window.location.protocol === 'file:' || host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '';
+        }
+
+        function renderSyncModal() {
+            const url = buildSyncUrl();
+            if (!url) return;
+            const today = detectedDays[selectedDayIndex] || { label: 'Today' };
+            syncModalSummary.textContent = `${today.label} • stop at ${formatClock(targetTimestamp)}`;
+            syncLinkInput.value = url;
+            syncLocalWarning.classList.toggle('hidden', !isLocalOnlyUrl());
+
+            const showFallback = (show) => {
+                syncQrCanvas.classList.toggle('hidden', show);
+                syncQrFallback.classList.toggle('hidden', !show);
+            };
+
+            if (window.QRCode && typeof window.QRCode.toCanvas === 'function') {
+                window.QRCode.toCanvas(syncQrCanvas, url, {
+                    width: 224,
+                    margin: 1,
+                    errorCorrectionLevel: 'M',
+                    color: { dark: '#020617', light: '#ffffff' }
+                }, (err) => {
+                    if (err) console.warn('snip8: QR render failed', err);
+                    showFallback(!!err);
+                });
+            } else {
+                showFallback(true);
+            }
+        }
+
+        function openSyncModal() {
+            if (!targetTimestamp) {
+                alert('Start a countdown first (paste a screenshot or use manual entry), then sync.');
+                return;
+            }
+            updateSyncUrl();
+            renderSyncModal();
+            if (typeof syncModal.showModal === 'function') {
+                if (!syncModal.open) syncModal.showModal();
+            } else {
+                syncModal.setAttribute('open', '');
+            }
+        }
+
+        function closeSyncModal() {
+            if (!syncModal || !syncModal.open) return;
+            if (typeof syncModal.close === 'function') syncModal.close();
+            else syncModal.removeAttribute('open');
+        }
+
+        let copyFeedbackTimeout = null;
+        async function copySyncLink() {
+            const url = syncLinkInput.value;
+            if (!url) return;
+            let ok = false;
+            try {
+                await navigator.clipboard.writeText(url);
+                ok = true;
+            } catch (e) {
+                // Fallback for non-secure contexts (http://, file://) where the async Clipboard API is unavailable
+                try {
+                    syncLinkInput.focus();
+                    syncLinkInput.select();
+                    ok = document.execCommand('copy');
+                } catch (e2) { ok = false; }
+            }
+            copySyncLinkBtn.textContent = ok ? '✔ Copied!' : 'Press Ctrl+C';
+            copySyncLinkBtn.classList.toggle('bg-emerald-500', ok);
+            if (!ok) syncLinkInput.select();
+            if (copyFeedbackTimeout) clearTimeout(copyFeedbackTimeout);
+            copyFeedbackTimeout = setTimeout(() => {
+                copySyncLinkBtn.textContent = 'Copy Sync Link';
+                copySyncLinkBtn.classList.remove('bg-emerald-500');
+            }, 1800);
+        }
+
+        syncMobileBtn.addEventListener('click', openSyncModal);
+        syncModalClose.addEventListener('click', closeSyncModal);
+        copySyncLinkBtn.addEventListener('click', copySyncLink);
+        syncLinkInput.addEventListener('focus', () => syncLinkInput.select());
+        // Click on the backdrop (outside the inner card) closes the modal; Esc is handled natively by <dialog>
+        syncModal.addEventListener('click', (e) => { if (e.target === syncModal) closeSyncModal(); });
+
+        // Initialize user preferences, then restore from a sync link (if any) or the saved session
         function init() {
             initLiveIncrementToggle();
-            hydrateSession();
+            if (!hydrateFromSyncLink()) hydrateSession();
         }
 
         if (document.readyState === 'loading') {
