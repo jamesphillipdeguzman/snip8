@@ -202,9 +202,11 @@ export const Snip8Validation = {
      */
     async validateWithAi(base64Image, options = {}) {
         const pin = options.user_pin || options.pin || (typeof localStorage !== 'undefined' ? localStorage.getItem('snip8_user_pin') : '') || '';
+        const workDate = options.work_date || (typeof window !== 'undefined' && window.state && window.state.workDate) || null;
         const payload = {
             image: base64Image,
             user_pin: pin,
+            work_date: workDate,
             dailyCapSeconds: options.dailyCapSeconds || 28800
         };
 

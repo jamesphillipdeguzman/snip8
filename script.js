@@ -24,6 +24,10 @@
 
         // Master application state for sync & AI validation
         const state = {
+            userPin: (function () {
+                try { return (localStorage.getItem('snip8_user_pin') || '').trim(); } catch (e) { return ''; }
+            })(),
+            workDate: new Date().toLocaleDateString('en-CA'), // 'YYYY-MM-DD' in local time
             loggedSeconds: 0,
             remainingSeconds: TARGET_DAILY_SEC,
             timesheetData: [],
@@ -31,6 +35,34 @@
             lastScannedImageUrl: null
         };
         window.state = state;
+
+        function parseDateStringToYyyyMmDd(str) {
+            if (!str || typeof str !== 'string') return null;
+            const trimmed = str.trim();
+            // Check YYYY-MM-DD
+            const isoMatch = trimmed.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+            if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+
+            // Check MM/DD/YYYY or MM/DD/YY
+            const mdyMatch = trimmed.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
+            if (mdyMatch) {
+                let y = parseInt(mdyMatch[3], 10);
+                if (y < 100) y += 2000;
+                const m = String(parseInt(mdyMatch[1], 10)).padStart(2, '0');
+                const d = String(parseInt(mdyMatch[2], 10)).padStart(2, '0');
+                return `${y}-${m}-${d}`;
+            }
+
+            // Check Day MM/DD (e.g. "Fri, 10/23" or "Thu 10/22" or "10/23")
+            const mdMatch = trimmed.match(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?(?:,|\s)*\b(\d{1,2})\/(\d{1,2})\b/i);
+            if (mdMatch) {
+                const y = new Date().getFullYear();
+                const m = String(parseInt(mdMatch[1], 10)).padStart(2, '0');
+                const d = String(parseInt(mdMatch[2], 10)).padStart(2, '0');
+                return `${y}-${m}-${d}`;
+            }
+            return null;
+        }
 
         // Live progress tracking baseline state
         let timerStartTime = null;
@@ -203,6 +235,7 @@
             try {
                 localStorage.removeItem(STORAGE_KEY_PIN);
             } catch (e) { }
+            state.userPin = '';
             updatePinUI();
         }
 
@@ -616,6 +649,25 @@
                     const aiResult = result;
                     setValidationProgress(85, 'Applying timesheet values & syncing...');
 
+                    // Respect Extracted Date on Scan:
+                    const todayStr = new Date().toLocaleDateString('en-CA');
+                    let detectedDate = null;
+                    if (aiResult.work_date) {
+                        detectedDate = parseDateStringToYyyyMmDd(aiResult.work_date);
+                    }
+                    if (!detectedDate && aiResult.dayLabel) {
+                        detectedDate = parseDateStringToYyyyMmDd(aiResult.dayLabel);
+                    }
+                    if (!detectedDate && Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
+                        for (const item of aiResult.timesheetData) {
+                            if (item && item.label) {
+                                detectedDate = parseDateStringToYyyyMmDd(item.label);
+                                if (detectedDate) break;
+                            }
+                        }
+                    }
+                    state.workDate = detectedDate || todayStr;
+
                     // 1. Update the master state directly
                     state.loggedSeconds = aiResult.loggedSeconds || 28805;
                     state.remainingSeconds = Math.max(0, 28800 - state.loggedSeconds);
@@ -641,9 +693,10 @@
                     } else {
                         const now = new Date();
                         const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                        const activeLabel = aiResult.dayLabel || todayLabel;
                         detectedDays = [{
-                            label: `${todayLabel} (AI)`,
-                            dayName: todayLabel.split(' ')[0],
+                            label: `${activeLabel} (AI)`,
+                            dayName: activeLabel.split(' ')[0],
                             h: aiH,
                             m: aiM,
                             s: aiS,
@@ -915,6 +968,20 @@
                 }];
                 selectedDayIndex = 0;
             }
+
+            // Respect Extracted Date on Scan:
+            const todayStr = new Date().toLocaleDateString('en-CA');
+            let detectedOcrDate = null;
+            if (detectedDays[selectedDayIndex] && detectedDays[selectedDayIndex].label) {
+                detectedOcrDate = parseDateStringToYyyyMmDd(detectedDays[selectedDayIndex].label);
+            }
+            if (!detectedOcrDate && daysFound && daysFound.length > 0) {
+                detectedOcrDate = parseDateStringToYyyyMmDd(daysFound[0].label);
+            }
+            if (!detectedOcrDate) {
+                detectedOcrDate = parseDateStringToYyyyMmDd(rawText) || parseDateStringToYyyyMmDd(cleaned);
+            }
+            state.workDate = detectedOcrDate || todayStr;
 
             // 8. Reconcile Active Day with Total Tracked Time
             if (totalTrackedSec > 0 && detectedDays[selectedDayIndex]) {
@@ -1572,7 +1639,7 @@
         }
 
         function getWorkDate() {
-            return new Date().toISOString().split('T')[0];
+            return state.workDate || new Date().toLocaleDateString('en-CA');
         }
 
         const STORAGE_KEY_OFFLINE_QUEUE = 'snip8_offline_queue';
@@ -1759,8 +1826,11 @@
             state.remainingSeconds = remSec;
             state.timesheetData = timesheetDataToSave;
 
-            const pin = getUserPin();
-            const workDate = getWorkDate();
+            const pin = state.userPin || getUserPin();
+            state.userPin = pin;
+            const todayStr = new Date().toLocaleDateString('en-CA');
+            const targetScanDate = state.workDate || todayStr;
+            const workDate = targetScanDate;
             const imageUrl = overrideImageUrl || state.lastScannedImageUrl || null;
 
             const payload = {
@@ -1774,9 +1844,17 @@
                 updated_at: new Date().toISOString()
             };
 
+            // Before dispatching saveSessionToNeon(), verify payload.work_date === todayStr (or the targeted scan date)
+            if (payload.work_date !== todayStr && payload.work_date !== targetScanDate) {
+                payload.work_date = targetScanDate;
+            }
+
             // Always persist immediately to local PWA cache & session keys (offline-first)
-            if (pin) {
-                localStorage.setItem(`snip8_cache_${pin}_${workDate}`, JSON.stringify(payload));
+            // Separate Cache per Day:
+            if (state.userPin && state.workDate) {
+                localStorage.setItem('snip8_cache_' + state.userPin + '_' + state.workDate, JSON.stringify(payload));
+            } else if (pin) {
+                localStorage.setItem('snip8_cache_' + pin + '_' + payload.work_date, JSON.stringify(payload));
             }
             saveSession();
 
@@ -1835,11 +1913,134 @@
         function loadCachedSession(userPin = getUserPin(), workDate = getWorkDate()) {
             if (!userPin) return false;
             try {
-                const cachedRaw = localStorage.getItem(`snip8_cache_${userPin}_${workDate}`);
+                const todayStr = new Date().toLocaleDateString('en-CA');
+                state.userPin = userPin;
+
+                // 1. Locate cache: first look for exact match on workDate
+                let cachedRaw = localStorage.getItem(`snip8_cache_${userPin}_${workDate}`);
+                let isOlderDate = false;
+                let cachedDate = '';
+
+                // If no cache for workDate (or if workDate is older than today), check any older cached session
+                if (!cachedRaw) {
+                    const allKeys = Object.keys(localStorage);
+                    const prefix = `snip8_cache_${userPin}_`;
+                    const matchingKeys = allKeys.filter(k => k.startsWith(prefix)).sort().reverse();
+                    if (matchingKeys.length > 0) {
+                        const latestKey = matchingKeys[0];
+                        cachedRaw = localStorage.getItem(latestKey);
+                        const dateSuffix = latestKey.slice(prefix.length);
+                        cachedDate = dateSuffix;
+                        if (dateSuffix && dateSuffix < todayStr) {
+                            isOlderDate = true;
+                        }
+                    }
+                }
+
                 if (!cachedRaw) return false;
                 const row = JSON.parse(cachedRaw);
                 if (!row || typeof row !== 'object') return false;
 
+                if (!cachedDate) {
+                    cachedDate = row.work_date || (row.updated_at ? new Date(row.updated_at).toLocaleDateString('en-CA') : '');
+                }
+                if (cachedDate && cachedDate < todayStr) {
+                    isOlderDate = true;
+                }
+
+                // If cached session is older than todayStr (e.g. yesterday 2026-10-22 vs today 2026-10-23):
+                if (isOlderDate) {
+                    state.workDate = todayStr;
+                    state.loggedSeconds = 0;
+                    state.remainingSeconds = TARGET_DAILY_SEC;
+                    baseTodaySec = 0;
+                    timerStartTime = null;
+                    targetTimestamp = null;
+                    timerCompleted = false;
+                    completedElapsedSec = 0;
+                    clearCountdownTimers();
+
+                    let days = row.timesheet_data;
+                    if (typeof days === 'string') {
+                        try { days = JSON.parse(days); } catch (e) { days = []; }
+                    }
+                    const historicalDays = Array.isArray(days) ? days : [];
+
+                    if (historicalDays.length > 0) {
+                        detectedDays = historicalDays.map((d, i) => {
+                            const h = Number(d && d.h) || 0;
+                            const m = Number(d && d.m) || 0;
+                            const s = Number(d && d.s) || 0;
+                            let label = String((d && d.label) || `Day ${i + 1}`);
+                            if (/^today\b/i.test(label)) {
+                                label = cachedDate ? `Past (${cachedDate})` : `Day ${i + 1}`;
+                            }
+                            return {
+                                label,
+                                dayName: String((d && d.dayName) || ''),
+                                h, m, s,
+                                sec: (d.sec !== undefined && d.sec !== null) ? Number(d.sec) : (h * 3600 + m * 60 + s),
+                                shifts: d.shifts || []
+                            };
+                        });
+                    } else if (Number(row.logged_seconds) > 0) {
+                        const histLabel = cachedDate || 'Yesterday';
+                        const logged = Number(row.logged_seconds);
+                        detectedDays = [{
+                            label: histLabel,
+                            dayName: histLabel.split(' ')[0] || '',
+                            h: Math.floor(logged / 3600),
+                            m: Math.floor((logged % 3600) / 60),
+                            s: logged % 60,
+                            sec: logged,
+                            shifts: []
+                        }];
+                    } else {
+                        detectedDays = [];
+                    }
+
+                    // Reset / create active day tab index for Today
+                    const now = new Date();
+                    const todayDayName = now.toLocaleDateString('en-US', { weekday: 'short' });
+                    const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+
+                    let todayIdx = detectedDays.findIndex(d => d.label.toLowerCase().includes(todayLabel.toLowerCase()) || (d.dayName && d.dayName.toLowerCase() === todayDayName.toLowerCase() && !d.label.includes('Past')));
+                    if (todayIdx === -1) {
+                        detectedDays.push({
+                            label: todayLabel,
+                            dayName: todayDayName,
+                            h: 0, m: 0, s: 0, sec: 0,
+                            shifts: []
+                        });
+                        todayIdx = detectedDays.length - 1;
+                    } else {
+                        detectedDays[todayIdx].h = 0;
+                        detectedDays[todayIdx].m = 0;
+                        detectedDays[todayIdx].s = 0;
+                        detectedDays[todayIdx].sec = 0;
+                        detectedDays[todayIdx].shifts = [];
+                    }
+                    selectedDayIndex = todayIdx;
+
+                    totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
+                    baseTotalTrackedSec = totalTrackedSec;
+                    state.timesheetData = detectedDays;
+
+                    if (row.last_scanned_image_url) {
+                        state.lastScannedImageUrl = row.last_scanned_image_url;
+                        renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
+                    }
+
+                    renderAll();
+                    updateLoggedDisplays();
+                    updateNeonBadge('offline', 'Ready for Today');
+                    rawOcrText.textContent = `(Rolled over to ${todayStr} • PIN ${maskPin(userPin)} • Historical days preserved)`;
+                    saveSession();
+                    return true;
+                }
+
+                // Normal path: current/today's cached session
+                state.workDate = row.work_date || workDate || todayStr;
                 const logged = Number(row.logged_seconds) || 0;
                 const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
                 const rem = row.total_seconds_remaining !== undefined
@@ -1967,6 +2168,11 @@
                 }
 
                 const row = data.session;
+                if (row.is_fresh_default) {
+                    updateNeonBadge('ready', 'Neon Ready');
+                    return true;
+                }
+
                 const localLogged = state.loggedSeconds || 0;
                 const dbLogged = Number(row.logged_seconds) || 0;
 
@@ -2030,7 +2236,7 @@
                     }
 
                     // Update local cache to match the verified remote state
-                    localStorage.setItem(`snip8_cache_${userPin}_${workDate}`, JSON.stringify(row));
+                    localStorage.setItem('snip8_cache_' + userPin + '_' + (row.work_date || workDate), JSON.stringify(row));
                     saveSession();
 
                     const updatedAt = new Date(row.updated_at || Date.now());
@@ -2093,9 +2299,9 @@
                 writeJSON(SESSION_KEYS.lastUpdated, new Date(timerStartTime || Date.now()).toISOString());
                 writeJSON(SESSION_KEYS.totalTrackedSec, totalTrackedSec);
 
-                const pin = getUserPin();
-                const workDate = getWorkDate();
-                if (pin) {
+                const pin = state.userPin || getUserPin();
+                const workDate = state.workDate || getWorkDate();
+                if (pin && workDate) {
                     const cachePayload = {
                         user_pin: pin,
                         work_date: workDate,
@@ -2106,7 +2312,7 @@
                         last_scanned_image_url: state.lastScannedImageUrl || null,
                         updated_at: new Date().toISOString()
                     };
-                    localStorage.setItem(`snip8_cache_${pin}_${workDate}`, JSON.stringify(cachePayload));
+                    localStorage.setItem('snip8_cache_' + pin + '_' + workDate, JSON.stringify(cachePayload));
                 }
                 return true;
             } catch (e) {
@@ -2188,6 +2394,15 @@
             if (!session) return false;
 
             const now = new Date();
+            const todayStr = new Date().toLocaleDateString('en-CA');
+            const sessionDate = session.lastUpdated ? new Date(session.lastUpdated).toLocaleDateString('en-CA') : '';
+
+            if (sessionDate && sessionDate < todayStr) {
+                clearSession();
+                state.workDate = todayStr;
+                return false;
+            }
+
             if (!isWithinTodayWindow(session.targetTimestamp, now)) {
                 clearSession(); // stale (previous day) — start fresh
                 return false;
@@ -2402,10 +2617,13 @@
                 try {
                     localStorage.setItem(STORAGE_KEY_PIN, enteredPin);
                 } catch (err) { }
+                state.userPin = enteredPin;
                 updatePinUI();
                 closePinModal();
 
-                const workDate = getWorkDate();
+                const todayStr = new Date().toLocaleDateString('en-CA');
+                state.workDate = state.workDate || todayStr;
+                const workDate = state.workDate;
                 const cachedLoaded = loadCachedSession(enteredPin, workDate);
                 if (!cachedLoaded) {
                     hydrateSession();
@@ -2461,9 +2679,13 @@
             initImagePreviewCard();
             updatePinUI();
 
-            // 2. Check for PIN
+            // Compute today's date in local time:
+            const todayStr = new Date().toLocaleDateString('en-CA'); // 'YYYY-MM-DD'
+            state.workDate = todayStr;
             const userPin = getUserPin();
-            const workDate = getWorkDate();
+            state.userPin = userPin;
+
+            // 2. Check for PIN
             if (!userPin) {
                 openPinModal();
                 updateNeonBadge('ready', 'Enter PIN');
@@ -2473,7 +2695,7 @@
 
             // 3. Immediate Local Hydration (Stale-While-Revalidate):
             // Load active user session from localStorage snip8_cache_${userPin}_${workDate}
-            const cachedLoaded = loadCachedSession(userPin, workDate);
+            const cachedLoaded = loadCachedSession(userPin, state.workDate);
             if (!cachedLoaded) {
                 const localLoaded = hydrateSession();
                 if (!localLoaded) {
@@ -2485,7 +2707,7 @@
             if (navigator.onLine) {
                 (async () => {
                     await flushOfflineQueue();
-                    await revalidateNeonSession(userPin, workDate);
+                    await revalidateNeonSession(userPin, state.workDate);
                 })().catch(e => {
                     console.warn('snip8: background revalidation error:', e);
                 });

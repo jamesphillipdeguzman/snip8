@@ -36,6 +36,7 @@ Extract the following:
 2. The remaining seconds needed to hit an 8-hour daily cap (8 hours = 28,800 seconds). If logged >= 28800, remaining is 0.
 3. List of individual work shifts/intervals detected in the timesheet (start time, end time, and duration in minutes). If shift intervals are not explicitly listed with start/end, estimate or provide the overall active shift block.
 4. Your confidence level: "high", "medium", or "low".
+5. Explicit work date (YYYY-MM-DD) or day label (e.g. "Fri, 10/23" or "Thu 10/22") if visible.
 
 Return your answer strictly according to the structured JSON schema.`;
 
@@ -49,6 +50,14 @@ Return your answer strictly according to the structured JSON schema.`;
             remainingSeconds: { 
                 type: 'integer',
                 description: 'Remaining seconds needed to reach 28800 seconds (8 hours)'
+            },
+            work_date: {
+                type: 'string',
+                description: 'Explicit work date in YYYY-MM-DD format if visible, or empty string if not found'
+            },
+            dayLabel: {
+                type: 'string',
+                description: 'Day label if visible in the timesheet, e.g. "Fri, 10/23" or "Thu 10/22", or empty string'
             },
             shifts: {
                 type: 'array',
@@ -183,10 +192,12 @@ export default async function handler(req, res) {
 
         // 2. Persist directly to Neon if userPin is present
         let savedSession = null;
+        const workDate = body.work_date || validationResult.work_date || null;
         if (userPin) {
             try {
                 savedSession = await upsertSession({
                     user_pin: userPin,
+                    work_date: workDate,
                     total_seconds_remaining: remainingSeconds,
                     daily_cap_seconds: dailyCapSeconds,
                     logged_seconds: loggedSeconds,
@@ -205,6 +216,8 @@ export default async function handler(req, res) {
             success: true,
             validatedVia: 'AI',
             modelUsed,
+            work_date: validationResult.work_date || null,
+            dayLabel: validationResult.dayLabel || null,
             loggedSeconds,
             remainingSeconds,
             shifts: validationResult.shifts || [],
