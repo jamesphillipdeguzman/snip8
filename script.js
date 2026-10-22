@@ -1,6 +1,11 @@
+        import { Snip8Theme } from './utils/theme.js';
+        import { Snip8Validation } from './utils/validation.js';
+
         const TARGET_DAILY_SEC = 8 * 3600;
         let countdownInterval = null;
         let deadlineTimeout = null;
+        let periodicSyncInterval = null;
+        let neonSaveTimeout = null;
         let alarmInterval = null;
         let targetTimestamp = null;
         let alarmDismissed = false;
@@ -61,6 +66,78 @@
         const syncLocalWarning = document.getElementById('syncLocalWarning');
         const syncLinkInput = document.getElementById('syncLinkInput');
         const copySyncLinkBtn = document.getElementById('copySyncLinkBtn');
+
+        // Neon & AI Vision Elements
+        const neonSyncBadge = document.getElementById('neonSyncBadge');
+        const neonSyncDot = document.getElementById('neonSyncDot');
+        const neonSyncLabel = document.getElementById('neonSyncLabel');
+        const aiValidationNotice = document.getElementById('aiValidationNotice');
+        const aiValidationDetail = document.getElementById('aiValidationDetail');
+        const aiValidationModel = document.getElementById('aiValidationModel');
+
+        // PIN Authentication State & Elements
+        const STORAGE_KEY_PIN = 'snip8_user_pin';
+        const pinIndicator = document.getElementById('pinIndicator');
+        const pinDisplay = document.getElementById('pinDisplay');
+        const switchPinBtn = document.getElementById('switchPinBtn');
+        const pinModal = document.getElementById('pinModal');
+        const pinForm = document.getElementById('pinForm');
+        const pinInput = document.getElementById('pinInput');
+        const pinErrorMsg = document.getElementById('pinErrorMsg');
+
+        function getUserPin() {
+            try {
+                return (localStorage.getItem(STORAGE_KEY_PIN) || '').trim();
+            } catch (e) {
+                return '';
+            }
+        }
+
+        function maskPin(pin) {
+            return pin ? '•'.repeat(Math.min(pin.length, 8)) : '••••';
+        }
+
+        function updatePinUI() {
+            const pin = getUserPin();
+            if (pinIndicator && pinDisplay) {
+                if (pin) {
+                    pinDisplay.textContent = maskPin(pin);
+                    pinIndicator.classList.remove('hidden');
+                } else {
+                    pinIndicator.classList.add('hidden');
+                }
+            }
+        }
+
+        function openPinModal() {
+            if (!pinModal) return;
+            if (pinErrorMsg) pinErrorMsg.classList.add('hidden');
+            if (pinInput) pinInput.value = '';
+            if (typeof pinModal.showModal === 'function') {
+                if (!pinModal.open) pinModal.showModal();
+            } else {
+                pinModal.setAttribute('open', '');
+            }
+            if (pinInput) {
+                setTimeout(() => pinInput.focus(), 60);
+            }
+        }
+
+        function closePinModal() {
+            if (!pinModal || !pinModal.open) return;
+            if (typeof pinModal.close === 'function') {
+                pinModal.close();
+            } else {
+                pinModal.removeAttribute('open');
+            }
+        }
+
+        function clearUserPin() {
+            try {
+                localStorage.removeItem(STORAGE_KEY_PIN);
+            } catch (e) { }
+            updatePinUI();
+        }
 
         // ===== Web Audio (single shared, lazily-created context) =====
         // Browsers start AudioContexts "suspended" until a user gesture, so we create one context
@@ -186,6 +263,13 @@
             statusContainer.classList.remove('hidden');
             statusContainer.textContent = "Enhancing contrast and running OCR on timesheet...";
 
+            let base64Image = null;
+            try {
+                base64Image = await Snip8Validation.toBase64(file);
+            } catch (b64Err) {
+                console.warn('snip8: Could not encode image to base64', b64Err);
+            }
+
             const img = new Image();
             img.src = URL.createObjectURL(file);
             await img.decode();
@@ -228,14 +312,74 @@
                 const result = await Tesseract.recognize(canvas, 'eng');
                 statusContainer.classList.add('hidden');
                 rawOcrText.textContent = result.data.text || "(No readable text detected)";
-                parseText(result.data.text);
+                await parseText(result.data.text, base64Image);
             } catch (err) {
+                console.warn('snip8: Tesseract OCR error, evaluating AI fallback:', err);
+                if (base64Image) {
+                    const fallbackHandled = await triggerAiValidationFallback(base64Image, 'Tesseract OCR failure');
+                    if (fallbackHandled) return;
+                }
                 statusContainer.classList.remove('hidden');
                 statusContainer.textContent = "OCR scan failed. Use manual entry below.";
             }
         }
 
-        function parseText(rawText) {
+        async function triggerAiValidationFallback(base64Image, reason) {
+            if (!base64Image) return false;
+            try {
+                statusContainer.classList.remove('hidden');
+                statusContainer.innerHTML = `<span>🤖 <strong>Triggering AI Vision:</strong> ${escapeHtml(reason)}<br>Validating timesheet with Gemini Vision...</span>`;
+
+                const result = await Snip8Validation.validateWithAi(base64Image, {
+                    dailyCapSeconds: TARGET_DAILY_SEC
+                });
+
+                if (result && result.success) {
+                    statusContainer.textContent = `✨ Timesheet validated via Gemini Vision AI (${result.confidence} confidence)`;
+                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
+
+                    if (aiValidationNotice && aiValidationDetail && aiValidationModel) {
+                        aiValidationDetail.textContent = `Confidence: ${(result.confidence || 'high').toUpperCase()} (${formatHms(result.loggedSeconds)} logged)`;
+                        aiValidationModel.textContent = result.modelUsed || 'Gemini Vision';
+                        aiValidationNotice.classList.remove('hidden');
+                    }
+
+                    if (Array.isArray(result.timesheetData) && result.timesheetData.length > 0) {
+                        detectedDays = result.timesheetData;
+                    } else {
+                        const now = new Date();
+                        const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                        const h = Math.floor(result.loggedSeconds / 3600);
+                        const m = Math.floor((result.loggedSeconds % 3600) / 60);
+                        const s = result.loggedSeconds % 60;
+                        detectedDays = [{
+                            label: `${todayLabel} (AI)`,
+                            dayName: todayLabel.split(' ')[0],
+                            h, m, s,
+                            sec: result.loggedSeconds,
+                            shifts: result.shifts || []
+                        }];
+                    }
+
+                    selectedDayIndex = 0;
+                    totalTrackedSec = result.loggedSeconds;
+
+                    rawOcrText.textContent = `=== VALIDATED VIA AI VISION (Gemini) ===\nModel: ${result.modelUsed}\nConfidence: ${result.confidence}\nLogged: ${formatHms(result.loggedSeconds)}\nRemaining for 8h: ${formatHms(result.remainingSeconds)}\n\nShifts:\n${JSON.stringify(result.shifts, null, 2)}`;
+
+                    renderAll();
+                    debouncedSaveSession();
+                    return true;
+                }
+            } catch (err) {
+                console.warn('snip8: AI Vision validation failed:', err);
+                statusContainer.classList.remove('hidden');
+                statusContainer.textContent = `AI fallback unavailable (${err.message}). Using manual entry.`;
+                setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+            }
+            return false;
+        }
+
+        async function parseText(rawText, base64Image = null) {
             if (!rawText) return;
 
             // 1. Normalization
@@ -328,6 +472,10 @@
             }
 
             if (daysFound.length === 0 && parsedDurations.length === 0) {
+                if (base64Image) {
+                    const handled = await triggerAiValidationFallback(base64Image, 'No timesheet columns detected by OCR');
+                    if (handled) return;
+                }
                 alert("Could not detect timesheet columns. Please use manual entry.");
                 return;
             }
@@ -387,6 +535,21 @@
                 totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
             }
 
+            // OCR Validation Heuristic
+            const fallbackCheck = Snip8Validation.shouldTriggerAiFallback({
+                rawText: cleaned,
+                parsedDurations,
+                totalTrackedSec,
+                detectedDays
+            });
+
+            if (fallbackCheck.shouldFallback && base64Image) {
+                console.log('snip8: triggering AI Vision fallback:', fallbackCheck.reason);
+                const handledByAi = await triggerAiValidationFallback(base64Image, fallbackCheck.reason);
+                if (handledByAi) return;
+            }
+
+            if (aiValidationNotice) aiValidationNotice.classList.add('hidden');
             renderAll();
         }
 
@@ -528,7 +691,7 @@
             if (restore) {
                 updateSessionMeta('restored');
             } else {
-                updateSessionMeta(saveSession() ? 'saved' : 'error');
+                debouncedSaveSession();
             }
 
             updateSyncUrl();
@@ -548,6 +711,8 @@
             countdownInterval = null;
             if (deadlineTimeout) clearTimeout(deadlineTimeout);
             deadlineTimeout = null;
+            if (periodicSyncInterval) clearInterval(periodicSyncInterval);
+            periodicSyncInterval = null;
         }
 
         function tickCountdown() {
@@ -566,6 +731,7 @@
                     ? Math.max(0, Math.round((targetTimestamp - timerStartTime) / 1000))
                     : 0;
                 updateLoggedDisplays();
+                debouncedSaveSession();
                 if (!alarmDismissed) triggerAlarm();
                 return;
             }
@@ -590,6 +756,14 @@
             // while a single non-chained timeout is much more likely to fire on time.
             const remainingMs = targetTimestamp - Date.now();
             if (remainingMs > 0) deadlineTimeout = setTimeout(tickCountdown, remainingMs + 50);
+
+            // Periodic cloud sync every 60s while timer runs
+            periodicSyncInterval = setInterval(() => {
+                if (targetTimestamp && countdownInterval) {
+                    debouncedSaveSession();
+                }
+            }, 60000);
+
             tickCountdown();
         }
 
@@ -673,7 +847,7 @@
             } else if (countdownInterval) {
                 startCountdown(); // reschedule the precise deadline timer
             }
-            if (detectedDays.length) updateSessionMeta(saveSession() ? 'saved' : 'error');
+            if (detectedDays.length) debouncedSaveSession();
             updateSyncUrl();
         }
 
@@ -696,11 +870,23 @@
             countdown.classList.remove('text-emerald-400');
             countdown.classList.add('text-white');
             updateLoggedDisplays();
+            debouncedSaveSession();
         });
 
         document.getElementById('clearSessionBtn').addEventListener('click', () => {
             if (!confirm('Clear the saved timesheet session? You will need to paste a new screenshot.')) return;
             clearSession();
+            try {
+                const pin = getUserPin();
+                if (pin) {
+                    fetch('/api/snip8-session', {
+                        method: 'DELETE',
+                        headers: { 'x-user-pin': pin }
+                    }).catch(() => {});
+                }
+            } catch (e) { }
+            updateNeonBadge('ready', 'Neon Ready');
+            if (aiValidationNotice) aiValidationNotice.classList.add('hidden');
             silenceAlarm();
             clearCountdownTimers();
             detectedDays = [];
@@ -742,7 +928,191 @@
             }
             totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
             renderAll();
+            debouncedSaveSession();
         });
+
+        // ===== Neon Database Persistence & Local Storage =====
+        function updateNeonBadge(state, label) {
+            if (!neonSyncBadge || !neonSyncDot || !neonSyncLabel) return;
+            neonSyncLabel.textContent = label;
+            if (state === 'synced') {
+                neonSyncDot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+                neonSyncBadge.className = 'text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-emerald-400 flex items-center gap-1.5';
+            } else if (state === 'syncing') {
+                neonSyncDot.className = 'w-2 h-2 rounded-full bg-amber-400 animate-pulse';
+                neonSyncBadge.className = 'text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-amber-400 flex items-center gap-1.5';
+            } else if (state === 'offline') {
+                neonSyncDot.className = 'w-2 h-2 rounded-full bg-slate-500';
+                neonSyncBadge.className = 'text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-400 flex items-center gap-1.5';
+            } else {
+                neonSyncDot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+                neonSyncBadge.className = 'text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-300 flex items-center gap-1.5';
+            }
+        }
+
+        function debouncedSaveSession() {
+            // Instant local persistence for offline reliability
+            saveSession();
+
+            // Debounced Neon write (1.5s) to preserve connection pool
+            if (neonSaveTimeout) clearTimeout(neonSaveTimeout);
+            neonSaveTimeout = setTimeout(() => {
+                saveToNeon();
+            }, 1500);
+        }
+
+        async function saveToNeon() {
+            if (detectedDays.length === 0 && !targetTimestamp) return;
+            const pin = getUserPin();
+            if (!pin) {
+                updateNeonBadge('ready', 'Enter PIN');
+                openPinModal();
+                return;
+            }
+
+            try {
+                const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
+                let elapsed = 0;
+                if (isLiveEnabled && timerStartTime) {
+                    elapsed = timerCompleted ? completedElapsedSec : getElapsedSeconds();
+                }
+
+                const currentTodaySec = baseTodaySec + elapsed;
+                const remSec = Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
+
+                const payload = {
+                    user_pin: pin,
+                    total_seconds_remaining: remSec,
+                    daily_cap_seconds: TARGET_DAILY_SEC,
+                    logged_seconds: currentTodaySec,
+                    timesheet_data: detectedDays,
+                    last_scanned_image_url: null
+                };
+
+                updateNeonBadge('syncing', 'Saving...');
+
+                const res = await fetch('/api/snip8-session', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-user-pin': pin
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (res.status === 401) {
+                    clearUserPin();
+                    updateNeonBadge('offline', 'PIN Required');
+                    openPinModal();
+                    return;
+                }
+
+                if (res.ok) {
+                    updateNeonBadge('synced', 'Neon Synced');
+                    updateSessionMeta('neon_saved');
+                } else {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+            } catch (err) {
+                console.warn('snip8: Neon save error:', err.message);
+                updateNeonBadge('offline', 'Saved Locally');
+            }
+        }
+
+        async function fetchNeonSession() {
+            const pin = getUserPin();
+            if (!pin) {
+                updateNeonBadge('ready', 'Enter PIN');
+                return false;
+            }
+
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+                const res = await fetch('/api/snip8-session', {
+                    signal: controller.signal,
+                    headers: {
+                        'x-user-pin': pin
+                    }
+                });
+                clearTimeout(timeoutId);
+
+                if (res.status === 401) {
+                    clearUserPin();
+                    updateNeonBadge('offline', 'PIN Required');
+                    openPinModal();
+                    return false;
+                }
+
+                if (!res.ok) return false;
+                const data = await res.json();
+                if (!data.success || !data.session) return false;
+
+                const session = data.session;
+                let days = session.timesheet_data;
+                if (typeof days === 'string') {
+                    try { days = JSON.parse(days); } catch (e) { days = []; }
+                }
+
+                // If this is a fresh daily session without scanned days yet
+                if (!Array.isArray(days) || days.length === 0) {
+                    updateNeonBadge('synced', 'Neon Ready (Today)');
+                    return false;
+                }
+
+                const cleanDays = days.map((d, i) => {
+                    const h = Number(d && d.h) || 0;
+                    const m = Number(d && d.m) || 0;
+                    const s = Number(d && d.s) || 0;
+                    return {
+                        label: String((d && d.label) || `Day ${i + 1}`),
+                        dayName: String((d && d.dayName) || ''),
+                        h, m, s,
+                        sec: h * 3600 + m * 60 + s,
+                        shifts: d.shifts || []
+                    };
+                });
+
+                const updatedAt = new Date(session.updated_at || Date.now());
+                const now = new Date();
+                const dailyCap = Number(session.daily_cap_seconds) || TARGET_DAILY_SEC;
+                const logged = Number(session.logged_seconds) || 0;
+                const remainingSec = session.total_seconds_remaining !== undefined
+                    ? Number(session.total_seconds_remaining)
+                    : Math.max(0, dailyCap - logged);
+
+                // Check calendar window
+                if (!isWithinTodayWindow(updatedAt, now)) {
+                    return false;
+                }
+
+                detectedDays = cleanDays;
+                selectedDayIndex = 0;
+                totalTrackedSec = logged > 0 ? logged : cleanDays.reduce((acc, d) => acc + d.sec, 0);
+
+                const target = new Date(Date.now() + remainingSec * 1000);
+
+                renderAll({
+                    restore: {
+                        startTime: updatedAt.getTime(),
+                        target,
+                        alarmDismissed: remainingSec <= 0
+                    }
+                });
+
+                // Update local storage cache
+                saveSession();
+
+                updateSessionMeta('neon');
+                updateNeonBadge('synced', 'Neon Synced');
+                rawOcrText.textContent = `(Session restored from Neon PostgreSQL for today • PIN ${maskPin(pin)} • last updated ${formatClock(updatedAt)}.)`;
+                return true;
+            } catch (err) {
+                console.warn('snip8: could not fetch session from Neon:', err);
+                return false;
+            }
+        }
 
         // ===== Session Persistence (localStorage) =====
         function writeJSON(key, value) {
@@ -830,6 +1200,8 @@
             if (state === 'error') { sessionMeta.textContent = '⚠ Session not saved (storage unavailable)'; return; }
             const when = timerStartTime ? formatClock(new Date(timerStartTime)) : '--';
             if (state === 'synced') { sessionMeta.textContent = `📱 Synced from link • saved on this device`; return; }
+            if (state === 'neon') { sessionMeta.textContent = `☁ Restored from Neon DB • active session`; return; }
+            if (state === 'neon_saved') { sessionMeta.textContent = `☁ Saved to Neon DB • last updated ${when}`; return; }
             sessionMeta.textContent = state === 'restored'
                 ? `↻ Restored session • last updated ${when}`
                 : `💾 Session saved • last updated ${when}`;
@@ -1036,10 +1408,78 @@
         // Click on the backdrop (outside the inner card) closes the modal; Esc is handled natively by <dialog>
         syncModal.addEventListener('click', (e) => { if (e.target === syncModal) closeSyncModal(); });
 
-        // Initialize user preferences, then restore from a sync link (if any) or the saved session
-        function init() {
+        // PIN Dialog Handlers
+        if (pinForm) {
+            pinForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const enteredPin = (pinInput ? pinInput.value : '').trim();
+                if (!/^\d{4,8}$/.test(enteredPin)) {
+                    if (pinErrorMsg) pinErrorMsg.classList.remove('hidden');
+                    return;
+                }
+                if (pinErrorMsg) pinErrorMsg.classList.add('hidden');
+                try {
+                    localStorage.setItem(STORAGE_KEY_PIN, enteredPin);
+                } catch (err) { }
+                updatePinUI();
+                closePinModal();
+
+                updateNeonBadge('syncing', 'Connecting...');
+                const restored = await fetchNeonSession();
+                if (!restored) {
+                    const restoredLocal = hydrateSession();
+                    if (!restoredLocal) {
+                        updateNeonBadge('ready', 'Neon Ready');
+                    }
+                }
+            });
+        }
+
+        if (switchPinBtn) {
+            switchPinBtn.addEventListener('click', () => {
+                clearUserPin();
+                openPinModal();
+            });
+        }
+
+        if (pinModal) {
+            pinModal.addEventListener('click', (e) => { if (e.target === pinModal) closePinModal(); });
+        }
+
+        // Initialize user preferences, theme, then restore from Neon DB with localStorage fallback
+        async function init() {
+            Snip8Theme.init();
             initLiveIncrementToggle();
-            if (!hydrateFromSyncLink()) hydrateSession();
+            updatePinUI();
+
+            // 1. If explicit sync link was opened, hydrate from it
+            if (hydrateFromSyncLink()) {
+                debouncedSaveSession();
+                return;
+            }
+
+            // 2. Check for PIN
+            const userPin = getUserPin();
+            if (!userPin) {
+                openPinModal();
+                updateNeonBadge('ready', 'Enter PIN');
+                hydrateSession();
+                return;
+            }
+
+            // 3. Query Neon backend for latest saved session for this PIN
+            updateNeonBadge('syncing', 'Connecting...');
+            const restoredFromNeon = await fetchNeonSession();
+
+            // 4. Fallback to localStorage if Neon was unreachable or empty
+            if (!restoredFromNeon) {
+                const restoredFromLocal = hydrateSession();
+                if (restoredFromLocal) {
+                    updateNeonBadge('offline', 'Local Session');
+                } else {
+                    updateNeonBadge('ready', 'Neon Ready');
+                }
+            }
         }
 
         if (document.readyState === 'loading') {

@@ -1,0 +1,25 @@
+# Environment variables (critical - contains Neon & Gemini keys)
+.env
+.env*.local
+.env.development
+.env.production
+
+# Dependencies
+node_modules/
+
+# Logs & debugging
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor & OS artifacts
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build outputs (if applicable later)
+dist/
+build/
+.cache/

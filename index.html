@@ -38,6 +38,21 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
+    <!-- Theme System Stylesheet & Anti-Flicker Initialization -->
+    <link rel="stylesheet" href="styles/theme.css">
+    <script>
+        (function () {
+            try {
+                var saved = localStorage.getItem('snip8_theme');
+                var prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+                var theme = saved || (prefersLight ? 'light' : 'dark');
+                document.documentElement.setAttribute('data-theme', theme);
+            } catch (e) {
+                document.documentElement.setAttribute('data-theme', 'dark');
+            }
+        })();
+    </script>
+
     <style>
         /* Pulsing halo for the alarm banner (keeps text fully opaque for contrast, unlike animate-pulse) */
         @keyframes alarmRing {
@@ -47,14 +62,14 @@
         .alarm-ring { animation: alarmRing 1.2s ease-in-out infinite; }
         @media (prefers-reduced-motion: reduce) { .alarm-ring { animation: none; } }
 
-        /* Sync-to-mobile modal */
-        #syncModal::backdrop { background: rgba(2, 6, 23, 0.8); backdrop-filter: blur(4px); }
+        /* Modals (Sync to mobile & PIN authentication) */
+        #syncModal::backdrop, #pinModal::backdrop { background: rgba(2, 6, 23, 0.85); backdrop-filter: blur(4px); }
         @keyframes syncPop {
             from { opacity: 0; transform: translateY(8px) scale(0.97); }
             to { opacity: 1; transform: translateY(0) scale(1); }
         }
-        #syncModal[open] { animation: syncPop 0.18s ease-out; }
-        @media (prefers-reduced-motion: reduce) { #syncModal[open] { animation: none; } }
+        #syncModal[open], #pinModal[open] { animation: syncPop 0.18s ease-out; }
+        @media (prefers-reduced-motion: reduce) { #syncModal[open], #pinModal[open] { animation: none; } }
     </style>
 </head>
 
@@ -81,13 +96,33 @@
                     </p>
                 </div>
             </div>
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center gap-2">
+                <div id="pinIndicator"
+                    class="hidden text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-300 flex items-center gap-1.5"
+                    title="User Session PIN">
+                    <span class="text-slate-500">PIN:</span>
+                    <span id="pinDisplay" class="text-emerald-400 font-bold tracking-widest">••••</span>
+                    <button id="switchPinBtn" type="button"
+                        class="ml-1 text-[11px] text-slate-400 hover:text-rose-400 hover:underline transition">Switch/Lock</button>
+                </div>
+                <span id="neonSyncBadge"
+                    class="text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-emerald-400 flex items-center gap-1.5"
+                    title="Neon Serverless PostgreSQL Persistence">
+                    <span id="neonSyncDot" class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span id="neonSyncLabel">Neon Sync</span>
+                </span>
                 <span
                     class="text-xs font-mono px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-slate-400">Strict
                     Daily Cap: 8h 00m</span>
                 <button id="testAudioBtn"
                     class="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 active:scale-95 border border-slate-700 rounded-lg text-xs font-medium text-slate-200 transition flex items-center gap-1.5">
                     <span>🔔</span> Test Chime
+                </button>
+                <button id="themeToggleBtn" data-theme-toggle type="button"
+                    class="theme-toggle-btn px-3 py-1.5 bg-slate-800 hover:bg-slate-700 active:scale-95 border border-slate-700 rounded-lg text-xs font-medium text-slate-200 transition flex items-center gap-1.5"
+                    aria-label="Toggle light / dark mode" title="Toggle light / dark mode">
+                    <span data-theme-icon>☀️</span>
+                    <span data-theme-label class="hidden sm:inline">Theme</span>
                 </button>
             </div>
         </header>
@@ -142,6 +177,16 @@
         <div id="statusContainer"
             class="hidden text-center text-xs font-mono text-emerald-400 p-2 bg-emerald-950/40 border border-emerald-500/20 rounded-xl animate-pulse">
             Enhancing image contrast and scanning hours with OCR...
+        </div>
+
+        <!-- AI Validation Notice Badge -->
+        <div id="aiValidationNotice"
+            class="hidden text-xs font-mono p-3 bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 rounded-xl flex items-center justify-between gap-3 shadow-lg">
+            <div class="flex items-center gap-2">
+                <span class="text-base" aria-hidden="true">✨</span>
+                <span><strong>Validated via AI Vision (Gemini):</strong> <span id="aiValidationDetail">Confidence: High</span></span>
+            </div>
+            <span id="aiValidationModel" class="text-[10px] px-2 py-0.5 rounded bg-emerald-900/60 border border-emerald-500/30">gemini-3.5-flash</span>
         </div>
 
         <!-- Active Timer & Status Dashboard -->
@@ -327,6 +372,8 @@
             </div>
         </details>
 
+
+
         <!-- Diagnostics / Raw OCR Log -->
         <details class="text-xs text-slate-500 border-t border-slate-800/60 pt-2">
             <summary class="cursor-pointer hover:text-slate-400 select-none">OCR Diagnostics / Raw Output</summary>
@@ -337,6 +384,41 @@
         </details>
 
     </div>
+
+    <!-- PIN Authentication Modal -->
+    <dialog id="pinModal" aria-labelledby="pinModalTitle"
+        class="m-auto p-0 w-[calc(100%-2rem)] max-w-sm bg-transparent text-slate-100">
+        <div class="bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl shadow-emerald-500/10 space-y-4">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-emerald-950/80 border border-emerald-500/30 flex items-center justify-center text-xl text-emerald-400">
+                    🔒
+                </div>
+                <div>
+                    <h2 id="pinModalTitle" class="text-base font-bold text-white tracking-tight">Access Timesheet</h2>
+                    <p class="text-xs text-slate-400 mt-0.5">Enter your PIN to access or sync timesheets</p>
+                </div>
+            </div>
+
+            <form id="pinForm" class="space-y-4">
+                <div class="space-y-1.5">
+                    <label for="pinInput" class="block text-xs font-semibold uppercase tracking-wider text-slate-400">PIN Code (4–8 Digits)</label>
+                    <input type="password" id="pinInput" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" minlength="4" required
+                        placeholder="••••" autocomplete="off"
+                        class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-center text-lg font-mono tracking-widest text-emerald-400 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500">
+                    <p id="pinErrorMsg" class="hidden text-xs text-rose-400 mt-1 font-medium">Please enter a 4–8 digit numeric PIN.</p>
+                </div>
+
+                <div class="text-[11px] text-slate-400 bg-slate-950/60 p-3 rounded-lg border border-slate-800 leading-relaxed">
+                    💡 <strong>Cross-device sync:</strong> Use this PIN to access or sync your timesheets today across devices.
+                </div>
+
+                <button type="submit" id="savePinBtn"
+                    class="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 active:scale-95 font-semibold text-white rounded-xl text-xs transition shadow-lg shadow-emerald-600/20">
+                    Unlock &amp; Sync Session
+                </button>
+            </form>
+        </div>
+    </dialog>
 
     <!-- Sync to Mobile Modal -->
     <dialog id="syncModal" aria-labelledby="syncModalTitle"
@@ -369,6 +451,8 @@
                 Use the deployed site to sync.
             </p>
 
+
+
             <div class="flex gap-2">
                 <input id="syncLinkInput" type="text" readonly aria-label="Sync link"
                     class="flex-1 min-w-0 bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-[11px] font-mono text-slate-300 outline-none focus:border-emerald-500">
@@ -381,7 +465,9 @@
     </dialog>
 
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.4.4/build/qrcode.min.js"></script>
-    <script src="script.js"></script>
+    <script src="utils/theme.js" type="module"></script>
+    <script src="utils/validation.js" type="module"></script>
+    <script src="script.js" type="module"></script>
 </body>
 
 </html>

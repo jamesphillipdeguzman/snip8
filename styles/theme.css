@@ -1,0 +1,239 @@
+/* snip8 Theme System — CSS Custom Properties */
+
+:root {
+    /* Base Color Tokens (Default Light) */
+    --bg-primary: #f8fafc;
+    --bg-surface: #ffffff;
+    --bg-surface-elevated: #f1f5f9;
+    --bg-card: #ffffff;
+    --bg-input: #ffffff;
+    --text-main: #0f172a;
+    --text-muted: #64748b;
+    --text-subtle: #94a3b8;
+    --border-color: #e2e8f0;
+    --border-hover: #cbd5e1;
+    --accent-timer: #059669;
+    --timer-bg: #f8fafc;
+    --accent-emerald: #10b981;
+    --accent-rose: #e11d48;
+    --accent-amber: #d97706;
+    --badge-bg: #f1f5f9;
+    --badge-text: #334155;
+    --shadow-card: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+}
+
+[data-theme='dark'] {
+    /* Dark Mode Palette */
+    --bg-primary: #020617;
+    --bg-surface: #0f172a;
+    --bg-surface-elevated: #1e293b;
+    --bg-card: #0f172a;
+    --bg-input: #020617;
+    --text-main: #f8fafc;
+    --text-muted: #94a3b8;
+    --text-subtle: #64748b;
+    --border-color: #1e293b;
+    --border-hover: #334155;
+    --accent-timer: #34d399;
+    --timer-bg: #020617;
+    --accent-emerald: #10b981;
+    --accent-rose: #f43f5e;
+    --accent-amber: #fbbf24;
+    --badge-bg: #1e293b;
+    --badge-text: #94a3b8;
+    --shadow-card: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.5);
+}
+
+/* Global root styling */
+html, body {
+    background-color: var(--bg-primary) !important;
+    color: var(--text-main) !important;
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+/* Surface and Component Classes */
+.theme-surface {
+    background-color: var(--bg-surface) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-main) !important;
+}
+
+.theme-card {
+    background-color: var(--bg-card) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-main) !important;
+    box-shadow: var(--shadow-card);
+}
+
+.theme-input {
+    background-color: var(--bg-input) !important;
+    border-color: var(--border-color) !important;
+    color: var(--text-main) !important;
+}
+
+.theme-text-main {
+    color: var(--text-main) !important;
+}
+
+.theme-text-muted {
+    color: var(--text-muted) !important;
+}
+
+.theme-border {
+    border-color: var(--border-color) !important;
+}
+
+/* Light Mode Overrides for Tailwind classes */
+[data-theme='light'] .bg-slate-950 {
+    background-color: var(--bg-primary) !important;
+}
+
+[data-theme='light'] .bg-slate-900,
+[data-theme='light'] .bg-slate-900\/90,
+[data-theme='light'] .bg-slate-900\/80,
+[data-theme='light'] .bg-slate-900\/60,
+[data-theme='light'] .bg-slate-900\/50 {
+    background-color: var(--bg-surface) !important;
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+}
+
+[data-theme='light'] .border-slate-800,
+[data-theme='light'] .border-slate-800\/80,
+[data-theme='light'] .border-slate-800\/60,
+[data-theme='light'] .border-slate-700 {
+    border-color: var(--border-color) !important;
+}
+
+[data-theme='light'] .text-white {
+    color: var(--text-main) !important;
+}
+
+[data-theme='light'] .text-slate-100 {
+    color: var(--text-main) !important;
+}
+
+[data-theme='light'] .text-slate-200 {
+    color: #1e293b !important;
+}
+
+[data-theme='light'] .text-slate-300 {
+    color: #334155 !important;
+}
+
+[data-theme='light'] .text-slate-400 {
+    color: var(--text-muted) !important;
+}
+
+[data-theme='light'] .text-slate-500 {
+    color: #64748b !important;
+}
+
+[data-theme='light'] .bg-slate-800 {
+    background-color: var(--bg-surface-elevated) !important;
+    color: var(--text-main) !important;
+}
+
+[data-theme='light'] .bg-slate-800:hover {
+    background-color: #e2e8f0 !important;
+}
+
+[data-theme='light'] .divide-slate-800\/60 > :not([hidden]) ~ :not([hidden]) {
+    border-color: var(--border-color) !important;
+}
+
+[data-theme='light'] #dropZone {
+    background-color: var(--bg-surface) !important;
+    border-color: var(--border-color) !important;
+}
+
+[data-theme='light'] #dropZone:hover {
+    background-color: #f1f5f9 !important;
+    border-color: var(--accent-emerald) !important;
+}
+
+[data-theme='light'] input[type="text"],
+[data-theme='light'] input[type="number"] {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    border-color: #cbd5e1 !important;
+}
+
+[data-theme='light'] input[type="text"]:focus,
+[data-theme='light'] input[type="number"]:focus {
+    border-color: var(--accent-emerald) !important;
+}
+
+[data-theme='light'] .bg-emerald-950\/40,
+[data-theme='light'] .bg-emerald-950\/30 {
+    background-color: #ecfdf5 !important;
+}
+
+[data-theme='light'] .text-emerald-400 {
+    color: #059669 !important;
+}
+
+[data-theme='light'] .border-emerald-500\/20,
+[data-theme='light'] .border-emerald-500\/30 {
+    border-color: #a7f3d0 !important;
+}
+
+[data-theme='light'] .bg-amber-950\/20,
+[data-theme='light'] .bg-amber-950\/40 {
+    background-color: #fffbeb !important;
+}
+
+[data-theme='light'] .text-amber-200\/90,
+[data-theme='light'] .text-amber-300,
+[data-theme='light'] .text-amber-400 {
+    color: #b45309 !important;
+}
+
+[data-theme='light'] .bg-slate-950\/60 {
+    background-color: #f1f5f9 !important;
+    border-color: #e2e8f0 !important;
+}
+
+[data-theme='light'] #rawOcrText {
+    background-color: #f8fafc !important;
+    color: #334155 !important;
+}
+
+/* Theme Toggle Button */
+.theme-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.375rem 0.625rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-surface-elevated);
+    color: var(--text-main);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.theme-toggle-btn:hover {
+    background-color: var(--border-hover);
+    transform: translateY(-1px);
+}
+
+.theme-toggle-btn:active {
+    transform: scale(0.96);
+}
+
+/* AI Validation Status Badge */
+.ai-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.6875rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-weight: 600;
+    border-radius: 0.375rem;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(6, 182, 212, 0.15));
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    color: var(--accent-emerald);
+}
