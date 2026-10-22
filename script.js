@@ -655,19 +655,52 @@
                 .replace(/\b0{1,2}\s*(?:hr|h)\s*,?\s*20\s*(?:min|m)\s*,?\s*0{1,2}\s*(?:sec|s)?/gi, '00 hr 00 min 00 sec')
                 .replace(/\b0{1,2}\s*(?:hr|h)\s*,?\s*20\s*(?:min|m)\s*,?\s*0\b/gi, '00 hr 00 min 00 sec');
 
-            // 2. Total time tracked extraction (top summary)
-            const totalRegex = /(?:Total\s*(?:time|tire|tine|tracked)?)[\s\S]{0,35}?(\d{1,2})\s*(?:hr|h|br|hrs?)\s*,?\s*(\d{1,2})\s*(?:min|m|mins?)(?:\s*,?\s*(\d{1,2})\s*(?:sec|s|secs?))?/i;
-            const totalMatch = cleaned.match(totalRegex);
-            totalTrackedSec = 0;
-            if (totalMatch) {
-                const totH = parseInt(totalMatch[1], 10);
-                const totM = parseInt(totalMatch[2], 10);
-                const totS = totalMatch[3] !== undefined ? parseInt(totalMatch[3], 10) : 0;
-                totalTrackedSec = totH * 3600 + totM * 60 + totS;
+            // 2. Top-Level Regex Priority in Local Parser (Daily Header Totals)
+            // Regex: /(?:(\d{1,2})\s*hr[s]?\s*)?(?:(\d{1,2})\s*min[s]?\s*)?(?:(\d{1,2})\s*sec[s]?)?/i
+            const headerTotalRegex = /(?:(\d{1,2})\s*hr[s]?\s*)?(?:(\d{1,2})\s*min[s]?\s*)?(?:(\d{1,2})\s*sec[s]?)?/i;
+            let totalHeaderSec = 0;
+
+            // Search cleaned OCR lines for daily header total with highest priority
+            const linesForHeader = cleaned.split('\n');
+            for (const line of linesForHeader) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                if (/\b(?:hr[s]?|min[s]?|sec[s]?)\b/i.test(trimmed)) {
+                    const durIdx = trimmed.search(/\d{1,2}\s*(?:hr[s]?|min[s]?|sec[s]?)\b/i);
+                    if (durIdx !== -1) {
+                        const candidate = trimmed.substring(durIdx);
+                        const hm = candidate.match(headerTotalRegex);
+                        if (hm && (hm[1] !== undefined || hm[2] !== undefined || hm[3] !== undefined)) {
+                            const h = hm[1] ? parseInt(hm[1], 10) : 0;
+                            const m = hm[2] ? parseInt(hm[2], 10) : 0;
+                            const s = hm[3] ? parseInt(hm[3], 10) : 0;
+                            const calcSec = h * 3600 + m * 60 + s;
+                            if (calcSec > 0) {
+                                totalHeaderSec = calcSec;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
+
+            // Fallback total time tracked extraction (top summary if not already matched)
+            if (totalHeaderSec === 0) {
+                const totalRegex = /(?:Total\s*(?:time|tire|tine|tracked)?)[\s\S]{0,35}?(\d{1,2})\s*(?:hr|h|br|hrs?)\s*,?\s*(\d{1,2})\s*(?:min|m|mins?)(?:\s*,?\s*(\d{1,2})\s*(?:sec|s|secs?))?/i;
+                const totalMatch = cleaned.match(totalRegex);
+                if (totalMatch) {
+                    const totH = parseInt(totalMatch[1], 10);
+                    const totM = parseInt(totalMatch[2], 10);
+                    const totS = totalMatch[3] !== undefined ? parseInt(totalMatch[3], 10) : 0;
+                    totalHeaderSec = totH * 3600 + totM * 60 + totS;
+                }
+            }
+
+            totalTrackedSec = totalHeaderSec;
 
             // Extract shift intervals (e.g. 5:05-8:22, 9:37-12:08, 12:32-2:45)
             const { shifts: extractedShifts, totalShiftSec } = Snip8Validation.extractShiftIntervals((rawText || '') + '\n' + cleaned);
+            const calculatedShiftSec = totalShiftSec;
 
             // 3. Remove all lines containing "total" so it doesn't get captured in columns
             const lines = cleaned.split('\n').filter(line => !/total/i.test(line)).join('\n');
@@ -702,8 +735,8 @@
             }
 
             // 6. Extract Column Durations (HH hr MM min SS sec or headless hr)
-            // Ensures "08 hr 00 min 05 sec" parses as 8h 0m 5s (28,805 sec), "08 hr 00 min" as 8h 0m 0s (28,800 sec), etc.
-            const durRegex = /(?:(\d{1,2})\s*(?:hr|h|hrs?)\b\s*,?\s*(?:(\d{1,2})\s*(?:min|m|mins?)\b\s*,?\s*)?(?:(\d{1,2})\s*(?:sec|s|secs?)\b)?)|(?:(\d{1,2})\s*(?:min|m|mins?)\b\s*,?\s*(?:(\d{1,2})\s*(?:sec|s|secs?)\b)?)|(?:(\d{1,2})\s*(?:sec|s|secs?)\b)/gi;
+            // Ensures "08 hr 00 min 05 sec" parses as 8h 0m 5s (28,805 sec) in a single duration match
+            const durRegex = /(?:(\d{1,2})\s*(?:hr|h|hrs?)\b(?:\s*,?\s*(\d{1,2})\s*(?:min|m|mins?)\b)?(?:\s*,?\s*(\d{1,2})\s*(?:sec|s|secs?)\b)?)|(?:(\d{1,2})\s*(?:min|m|mins?)\b(?:\s*,?\s*(\d{1,2})\s*(?:sec|s|secs?)\b)?)|(?:(\d{1,2})\s*(?:sec|s|secs?)\b)/gi;
             const parsedDurations = [];
             let dm;
             while ((dm = durRegex.exec(textForColumns)) !== null) {
@@ -745,7 +778,7 @@
                 }
             }
 
-            if (daysFound.length === 0 && parsedDurations.length === 0) {
+            if (daysFound.length === 0 && parsedDurations.length === 0 && totalHeaderSec === 0) {
                 if (base64Image) {
                     const handled = await triggerAiValidationFallback(base64Image, 'No timesheet columns detected by OCR');
                     if (handled) return;
@@ -755,43 +788,67 @@
             }
 
             // 7. Map parsed columns
-            const count = Math.max(daysFound.length, parsedDurations.length);
+            // Do NOT split the same day into multiple "Day 1" and "Day 2" rows when a single date header is detected
             detectedDays = [];
-            for (let i = 0; i < count; i++) {
-                const label = daysFound[i] ? daysFound[i].label : `Day ${i + 1}`;
-                const dur = parsedDurations[i] || { h: 0, m: 0, s: 0, sec: 0 };
-                detectedDays.push({
-                    label,
-                    dayName: daysFound[i] ? daysFound[i].dayName : '',
-                    h: dur.h,
-                    m: dur.m,
-                    s: dur.s,
-                    sec: dur.sec
-                });
-            }
+            if (daysFound.length === 1) {
+                // Exactly one date header detected: treat total as the single daily total for this date
+                const day = daysFound[0];
+                const durSec = totalHeaderSec > 0 ? totalHeaderSec : (parsedDurations.length > 0 ? parsedDurations[0].sec : calculatedShiftSec);
+                detectedDays = [{
+                    label: day.label,
+                    dayName: day.dayName,
+                    h: Math.floor(durSec / 3600),
+                    m: Math.floor((durSec % 3600) / 60),
+                    s: durSec % 60,
+                    sec: durSec,
+                    shifts: extractedShifts
+                }];
+                selectedDayIndex = 0;
+            } else if (daysFound.length > 1) {
+                for (let i = 0; i < daysFound.length; i++) {
+                    const dur = parsedDurations[i] || { h: 0, m: 0, s: 0, sec: 0 };
+                    detectedDays.push({
+                        label: daysFound[i].label,
+                        dayName: daysFound[i].dayName,
+                        h: dur.h,
+                        m: dur.m,
+                        s: dur.s,
+                        sec: dur.sec,
+                        shifts: i === 0 ? extractedShifts : []
+                    });
+                }
 
-            // 8. Smart Active Day Selection:
-            // First priority: Match today's day of week (e.g. "Fri")
-            const now = new Date();
-            const todayName = now.toLocaleDateString('en-US', { weekday: 'short' }); // "Fri"
-            let matchedIndex = detectedDays.findIndex(d => d.label.toLowerCase().includes(todayName.toLowerCase()));
-
-            // Fallback: If not matched by day name, pick the latest day with sec > 0
-            if (matchedIndex === -1) {
-                for (let i = detectedDays.length - 1; i >= 0; i--) {
-                    if (detectedDays[i].sec > 0) {
-                        matchedIndex = i;
-                        break;
+                // Smart Active Day Selection: Match today's day of week or latest day with sec > 0
+                const now = new Date();
+                const todayName = now.toLocaleDateString('en-US', { weekday: 'short' });
+                let matchedIndex = detectedDays.findIndex(d => d.label.toLowerCase().includes(todayName.toLowerCase()));
+                if (matchedIndex === -1) {
+                    for (let i = detectedDays.length - 1; i >= 0; i--) {
+                        if (detectedDays[i].sec > 0) {
+                            matchedIndex = i;
+                            break;
+                        }
                     }
                 }
+                selectedDayIndex = matchedIndex >= 0 ? matchedIndex : 0;
+            } else {
+                // No explicit date header: single active day
+                const durSec = totalHeaderSec > 0 ? totalHeaderSec : (parsedDurations.length > 0 ? parsedDurations[0].sec : calculatedShiftSec);
+                const now = new Date();
+                const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                detectedDays = [{
+                    label: todayLabel,
+                    dayName: todayLabel.split(' ')[0],
+                    h: Math.floor(durSec / 3600),
+                    m: Math.floor((durSec % 3600) / 60),
+                    s: durSec % 60,
+                    sec: durSec,
+                    shifts: extractedShifts
+                }];
+                selectedDayIndex = 0;
             }
 
-            selectedDayIndex = matchedIndex >= 0 ? matchedIndex : 0;
-
-            // 9. Reconcile Active Day with Total Tracked Time
-            // When totalTrackedSec is read from the pay period summary (e.g. 2 hr, 54 min, 10 sec):
-            // If today is the active day and all other columns are 0, reconcile the active day's duration
-            // with the pay period total (correcting OCR misreads like '04 min' for '54 min' or '0h 0m 0s')
+            // 8. Reconcile Active Day with Total Tracked Time
             if (totalTrackedSec > 0 && detectedDays[selectedDayIndex]) {
                 const otherDaysSec = detectedDays.reduce((acc, d, idx) => idx === selectedDayIndex ? acc : acc + d.sec, 0);
                 if (otherDaysSec === 0) {
@@ -814,23 +871,28 @@
                 detectedDays[selectedDayIndex].shifts = extractedShifts;
             }
 
-            // 10. Shift Total & Duration Sanity Check:
-            // Auto-trigger AI fallback if:
-            // 1) total parsed time < 1 hour but 2+ shifts were detected
-            // 2) duration string contains "08 hr" but total is under 1 minute (e.g. parsed as 5 seconds)
-            // 3) shift sum is ~8 hours but parsed header total is < 1 hour
+            // 9. Auto-fallback to Gemini if local OCR is ambiguous:
+            // - If local OCR loggedSeconds calculates to less than the header duration
+            // - If multiple days are erroneously created for a single date
+            // - If shift sum is around 8 hours but parsed header total is < 1 hour
             const activeDaySec = detectedDays[selectedDayIndex] ? detectedDays[selectedDayIndex].sec : 0;
             const parsedHeaderTotalSec = totalTrackedSec > 0 ? totalTrackedSec : activeDaySec;
 
+            const isLoggedLessThanHeader = totalHeaderSec > 0 && activeDaySec < totalHeaderSec;
+            const hasMultipleDaysForSingleDate = daysFound.length === 1 && (parsedDurations.length > 1 || detectedDays.length > 1);
             const hasUnder1HourWithMultipleShifts = parsedHeaderTotalSec < 3600 && extractedShifts.length >= 2;
             const combinedOcrText = (rawText || '') + ' ' + cleaned;
             const has8HrStringWithUnder1MinTotal = /\b0?8\s*(?:hr|h|hrs)\b/i.test(combinedOcrText) && parsedHeaderTotalSec < 60;
             const isShiftSumAround8h = totalShiftSec >= 6 * 3600 && totalShiftSec <= 12 * 3600;
             const hasShiftSumMismatch = isShiftSumAround8h && parsedHeaderTotalSec < 3600;
 
-            if (hasUnder1HourWithMultipleShifts || has8HrStringWithUnder1MinTotal || hasShiftSumMismatch) {
+            if (isLoggedLessThanHeader || hasMultipleDaysForSingleDate || hasUnder1HourWithMultipleShifts || has8HrStringWithUnder1MinTotal || hasShiftSumMismatch) {
                 let mismatchReason = '';
-                if (has8HrStringWithUnder1MinTotal) {
+                if (isLoggedLessThanHeader) {
+                    mismatchReason = `Local OCR logged time (${formatHms(activeDaySec)}) is less than header duration (${formatHms(totalHeaderSec)}). Auto-dispatching to Gemini AI.`;
+                } else if (hasMultipleDaysForSingleDate) {
+                    mismatchReason = `Multiple days detected for a single date header (${daysFound[0]?.label}). Auto-dispatching to Gemini AI.`;
+                } else if (has8HrStringWithUnder1MinTotal) {
                     mismatchReason = `Timesheet text contains "08 hr" but parsed total is only ${formatHms(parsedHeaderTotalSec)} (< 1 min). Local OCR marked INVALID.`;
                 } else if (hasUnder1HourWithMultipleShifts) {
                     mismatchReason = `${extractedShifts.length} work shifts detected summing to ~${Math.round(totalShiftSec / 3600)}h, but parsed header total is only ${formatHms(parsedHeaderTotalSec)} (< 1h). Local OCR marked INVALID.`;
@@ -838,7 +900,7 @@
                     mismatchReason = `Shift intervals sum to ~${Math.round(totalShiftSec / 3600)}h (${formatHms(totalShiftSec)}), but parsed header total is < 1h (${formatHms(parsedHeaderTotalSec)}). Local OCR marked INVALID.`;
                 }
 
-                console.warn('snip8: Sanity check failed:', mismatchReason);
+                console.warn('snip8: Sanity check / ambiguity detected:', mismatchReason);
                 updateParseSourceBadge('parsing');
 
                 if (base64Image) {
@@ -854,7 +916,9 @@
                 totalTrackedSec,
                 detectedDays,
                 extractedShifts,
-                shiftSumSec: totalShiftSec
+                shiftSumSec: totalShiftSec,
+                totalHeaderSec,
+                daysFound
             });
 
             if (fallbackCheck.shouldFallback && base64Image) {
@@ -863,6 +927,50 @@
                 const handledByAi = await triggerAiValidationFallback(base64Image, fallbackCheck.reason);
                 if (handledByAi) return;
             }
+
+            // 10. Immediate Neon Save with Header Total:
+            const finalLoggedSec = totalHeaderSec > 0 ? totalHeaderSec : calculatedShiftSec;
+            const finalRemainingSec = Math.max(0, 28800 - finalLoggedSec);
+
+            state.loggedSeconds = finalLoggedSec;
+            state.remainingSeconds = finalRemainingSec;
+
+            const parsedShifts = extractedShifts && extractedShifts.length > 0
+                ? extractedShifts
+                : (detectedDays && detectedDays.length > 0
+                    ? detectedDays
+                    : [{ h: Math.floor(finalLoggedSec / 3600), m: Math.floor((finalLoggedSec % 3600) / 60), s: finalLoggedSec % 60 }]);
+            state.timesheetData = parsedShifts;
+
+            // Ensure active day reflects finalLoggedSec
+            if (detectedDays[selectedDayIndex]) {
+                detectedDays[selectedDayIndex].h = Math.floor(finalLoggedSec / 3600);
+                detectedDays[selectedDayIndex].m = Math.floor((finalLoggedSec % 3600) / 60);
+                detectedDays[selectedDayIndex].s = finalLoggedSec % 60;
+                detectedDays[selectedDayIndex].sec = finalLoggedSec;
+                if (!detectedDays[selectedDayIndex].shifts || detectedDays[selectedDayIndex].shifts.length === 0) {
+                    detectedDays[selectedDayIndex].shifts = parsedShifts;
+                }
+            }
+
+            baseTodaySec = finalLoggedSec;
+            baseTotalTrackedSec = Math.max(totalTrackedSec, finalLoggedSec);
+            totalTrackedSec = baseTotalTrackedSec;
+
+            if (finalLoggedSec >= TARGET_DAILY_SEC) {
+                timerCompleted = true;
+                completedElapsedSec = 0;
+                clearCountdownTimers();
+            }
+
+            // Cancel any pending debounced save so it doesn't overwrite
+            if (neonSaveTimeout) {
+                clearTimeout(neonSaveTimeout);
+                neonSaveTimeout = null;
+            }
+
+            // Immediate Neon save with verified header total
+            await saveSessionToNeon(finalLoggedSec, finalRemainingSec, parsedShifts);
 
             // Local OCR completed successfully
             updateParseSourceBadge('ocr');
@@ -953,8 +1061,14 @@
             const today = detectedDays[selectedDayIndex] || { label: 'Active Day', h: 0, m: 0, s: 0, sec: 0 };
             baseTodaySec = today.sec;
             baseTotalTrackedSec = totalTrackedSec;
-            timerCompleted = false;
-            completedElapsedSec = 0;
+            if (today.sec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+                timerCompleted = true;
+                completedElapsedSec = 0;
+                clearCountdownTimers();
+            } else {
+                timerCompleted = false;
+                completedElapsedSec = 0;
+            }
 
             if (restore) {
                 // Keep the original baseline so live increment + countdown continue seamlessly after refresh

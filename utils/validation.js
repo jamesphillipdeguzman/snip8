@@ -91,7 +91,7 @@ export const Snip8Validation = {
      * @param {number} [params.shiftSumSec] - Sum of extracted shift durations in seconds
      * @returns {{ shouldFallback: boolean, reason: string }}
      */
-    shouldTriggerAiFallback({ rawText = '', parsedDurations = [], totalTrackedSec = 0, detectedDays = [], extractedShifts = [], shiftSumSec = 0 }) {
+    shouldTriggerAiFallback({ rawText = '', parsedDurations = [], totalTrackedSec = 0, detectedDays = [], extractedShifts = [], shiftSumSec = 0, totalHeaderSec = 0, daysFound = [] }) {
         const text = (rawText || '').trim();
 
         // 1. If text is completely empty or very short, OCR found nothing
@@ -128,6 +128,22 @@ export const Snip8Validation = {
             return {
                 shouldFallback: true,
                 reason: `Shift intervals sum to ~${Math.round(calculatedShiftSum / 3600)}h (${calculatedShiftSum}s), but parsed header total is < 1h (${parsedHeaderSec}s). Local OCR marked INVALID.`
+            };
+        }
+
+        // Header vs logged duration mismatch (local OCR calculated less than header duration)
+        if (totalHeaderSec > 0 && activeSec < totalHeaderSec) {
+            return {
+                shouldFallback: true,
+                reason: `Local OCR logged time (${activeSec}s) is less than detected header duration (${totalHeaderSec}s).`
+            };
+        }
+
+        // Ambiguous OCR: Multiple days or durations detected when only a single date header was present
+        if (daysFound.length === 1 && (parsedDurations.length > 1 || detectedDays.length > 1)) {
+            return {
+                shouldFallback: true,
+                reason: `Ambiguous OCR: Multiple days/durations detected for single date header (${daysFound[0]?.label || 'single date'}).`
             };
         }
 
