@@ -74,6 +74,26 @@
         const aiValidationNotice = document.getElementById('aiValidationNotice');
         const aiValidationDetail = document.getElementById('aiValidationDetail');
         const aiValidationModel = document.getElementById('aiValidationModel');
+        const parseSourceBadge = document.getElementById('parseSourceBadge');
+        const forceAiBtn = document.getElementById('forceAiBtn');
+
+        function updateParseSourceBadge(type, detail = '') {
+            if (!parseSourceBadge) return;
+            if (type === 'ocr') {
+                parseSourceBadge.textContent = '⚡ Local OCR';
+                parseSourceBadge.className = 'text-xs px-2 py-0.5 rounded bg-slate-800 text-emerald-400 border border-emerald-500/30 font-mono font-medium';
+            } else if (type === 'ai') {
+                const confText = detail ? ` (Confidence: ${detail})` : '';
+                parseSourceBadge.textContent = `✨ Gemini AI Validated${confText}`;
+                parseSourceBadge.className = 'text-xs px-2 py-0.5 rounded bg-indigo-950/90 text-indigo-300 border border-indigo-500/50 font-mono font-medium shadow-sm';
+            } else if (type === 'parsing') {
+                parseSourceBadge.textContent = '🤖 Validating with Gemini AI...';
+                parseSourceBadge.className = 'text-xs px-2 py-0.5 rounded bg-amber-950/80 text-amber-300 border border-amber-500/40 font-mono animate-pulse';
+            } else {
+                parseSourceBadge.textContent = 'Awaiting scan';
+                parseSourceBadge.className = 'text-xs px-2 py-1 rounded bg-slate-800 text-slate-300';
+            }
+        }
 
         // PIN Authentication State & Elements
         const STORAGE_KEY_PIN = 'snip8_user_pin';
@@ -256,6 +276,9 @@
         });
 
         async function processFile(file) {
+            // Store the last uploaded image file/blob in memory as window.lastUploadedTimesheet
+            window.lastUploadedTimesheet = file;
+
             // Called from a paste/upload gesture: good moment to unlock audio + ask for notifications
             ensureAudioRunning();
             requestNotificationPermission();
@@ -308,6 +331,17 @@
             }
             ctx.putImageData(imgData, 0, 0);
 
+            if (!base64Image) {
+                try {
+                    base64Image = canvas.toDataURL('image/png');
+                } catch (cErr) {
+                    console.warn('snip8: Could not encode canvas to base64', cErr);
+                }
+            }
+            if (base64Image) {
+                window.lastUploadedTimesheetBase64 = base64Image;
+            }
+
             try {
                 const result = await Tesseract.recognize(canvas, 'eng');
                 statusContainer.classList.add('hidden');
@@ -335,6 +369,10 @@
                 });
 
                 if (result && result.success) {
+                    const rawConf = result.confidence || 'High';
+                    const conf = rawConf.charAt(0).toUpperCase() + rawConf.slice(1).toLowerCase();
+                    updateParseSourceBadge('ai', conf);
+
                     statusContainer.textContent = `✨ Timesheet validated via Gemini Vision AI (${result.confidence} confidence)`;
                     setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
 
@@ -368,6 +406,7 @@
 
                     renderAll();
                     debouncedSaveSession();
+                    saveToNeon();
                     return true;
                 }
             } catch (err) {
@@ -401,23 +440,30 @@
                 .replace(/\b0{1,2}\s*(?:hr|h)\s*,?\s*20\s*(?:min|m)\s*,?\s*0\b/gi, '00 hr 00 min 00 sec');
 
             // 2. Total time tracked extraction (top summary)
-            const totalRegex = /Total\s*(?:time|tire|tine)?[\s\S]{0,35}?(\d{1,2})\s*(?:hr|h|br)\s*,?\s*(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/i;
+            const totalRegex = /(?:Total\s*(?:time|tire|tine|tracked)?)[\s\S]{0,35}?(\d{1,2})\s*(?:hr|h|br|hrs?)\s*,?\s*(\d{1,2})\s*(?:min|m|mins?)(?:\s*,?\s*(\d{1,2})\s*(?:sec|s|secs?))?/i;
             const totalMatch = cleaned.match(totalRegex);
             totalTrackedSec = 0;
             if (totalMatch) {
-                totalTrackedSec = parseInt(totalMatch[1], 10) * 3600 + parseInt(totalMatch[2], 10) * 60 + parseInt(totalMatch[3], 10);
+                const totH = parseInt(totalMatch[1], 10);
+                const totM = parseInt(totalMatch[2], 10);
+                const totS = totalMatch[3] !== undefined ? parseInt(totalMatch[3], 10) : 0;
+                totalTrackedSec = totH * 3600 + totM * 60 + totS;
             }
+
+            // Extract shift intervals (e.g. 5:05-8:22, 9:37-12:08, 12:32-2:45)
+            const { shifts: extractedShifts, totalShiftSec } = Snip8Validation.extractShiftIntervals((rawText || '') + '\n' + cleaned);
 
             // 3. Remove all lines containing "total" so it doesn't get captured in columns
             const lines = cleaned.split('\n').filter(line => !/total/i.test(line)).join('\n');
 
             // 4. Sanitize timezone markers, time ranges, and lone axis digits/offsets before day durations
+            // Note: Never strip duration units (hr/min/sec) or digits preceding "min/sec"
             let textForColumns = lines
                 .replace(/\bGMT\b/gi, ' ')
                 .replace(/\b\d{1,2}\s*(?:AM|PM)\b/gi, ' ') // e.g. 10 AM, 12 AM
-                .replace(/(?:^|\s)[+-]?\d{1,2}(?:\s+[a-z])?(?=\s+(?:00|\d{1,2}\s*hr))/gim, ' ')
-                .replace(/(?:^|\s)[+-]?\d{1,2}(?=\s+[+-]?\d{1,2}\s+(?:00|\d{1,2}\s*hr))/gim, ' ')
-                .replace(/(?:^|\s)[+-]?\d{1,2}(?=\s+(?:00|\d{1,2}\s*hr))/gim, ' ');
+                .replace(/(?:^|\s)[+-]?\d{1,2}(?:\s+[a-gi-ln-rt-z]\b)?(?=\s+(?:00|\d{1,2})\s*(?:hr|h)\b)/gim, ' ')
+                .replace(/(?:^|\s)[+-]?\d{1,2}(?=\s+[+-]?\d{1,2}\s+(?:00|\d{1,2})\s*(?:hr|h)\b)/gim, ' ')
+                .replace(/(?:^|\s)[+-]?\d{1,2}(?=\s+(?:00|\d{1,2})\s*(?:hr|h)\b)/gim, ' ');
 
             // 5. Extract Date Headers (e.g. Thu 10/1, Fri 10/2)
             const dayHeaderRegex = /\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Man)\b[\s\S]{0,4}?(\d{1,2}[\/\w]+)/gi;
@@ -440,13 +486,25 @@
             }
 
             // 6. Extract Column Durations (HH hr MM min SS sec or headless hr)
-            const durRegex = /(?:(\d{1,2})\s*(?:hr|h)\s*,?\s*)?(\d{1,2})\s*(?:min|m)\s*,?\s*(\d{1,2})\s*(?:sec|s)/gi;
+            // Ensures "08 hr 00 min 05 sec" parses as 8h 0m 5s (28,805 sec), "08 hr 00 min" as 8h 0m 0s (28,800 sec), etc.
+            const durRegex = /(?:(\d{1,2})\s*(?:hr|h|hrs?)\b\s*,?\s*(?:(\d{1,2})\s*(?:min|m|mins?)\b\s*,?\s*)?(?:(\d{1,2})\s*(?:sec|s|secs?)\b)?)|(?:(\d{1,2})\s*(?:min|m|mins?)\b\s*,?\s*(?:(\d{1,2})\s*(?:sec|s|secs?)\b)?)|(?:(\d{1,2})\s*(?:sec|s|secs?)\b)/gi;
             const parsedDurations = [];
             let dm;
             while ((dm = durRegex.exec(textForColumns)) !== null) {
-                let h = dm[1] !== undefined ? parseInt(dm[1], 10) : 0;
-                let m = parseInt(dm[2], 10);
-                let s = parseInt(dm[3], 10);
+                let h = 0;
+                let m = 0;
+                let s = 0;
+
+                if (dm[1] !== undefined) {
+                    h = parseInt(dm[1], 10);
+                    m = dm[2] !== undefined ? parseInt(dm[2], 10) : 0;
+                    s = dm[3] !== undefined ? parseInt(dm[3], 10) : 0;
+                } else if (dm[4] !== undefined) {
+                    m = parseInt(dm[4], 10);
+                    s = dm[5] !== undefined ? parseInt(dm[5], 10) : 0;
+                } else if (dm[6] !== undefined) {
+                    s = parseInt(dm[6], 10);
+                }
 
                 // If hour was headless (e.g. "hr 41 min 36 sec"), inspect preceding token
                 if (dm[1] === undefined) {
@@ -535,19 +593,63 @@
                 totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
             }
 
+            // Attach extracted shifts if active day doesn't already have them
+            if (detectedDays[selectedDayIndex] && (!detectedDays[selectedDayIndex].shifts || detectedDays[selectedDayIndex].shifts.length === 0)) {
+                detectedDays[selectedDayIndex].shifts = extractedShifts;
+            }
+
+            // 10. Shift Total & Duration Sanity Check:
+            // Auto-trigger AI fallback if:
+            // 1) total parsed time < 1 hour but 2+ shifts were detected
+            // 2) duration string contains "08 hr" but total is under 1 minute (e.g. parsed as 5 seconds)
+            // 3) shift sum is ~8 hours but parsed header total is < 1 hour
+            const activeDaySec = detectedDays[selectedDayIndex] ? detectedDays[selectedDayIndex].sec : 0;
+            const parsedHeaderTotalSec = totalTrackedSec > 0 ? totalTrackedSec : activeDaySec;
+
+            const hasUnder1HourWithMultipleShifts = parsedHeaderTotalSec < 3600 && extractedShifts.length >= 2;
+            const combinedOcrText = (rawText || '') + ' ' + cleaned;
+            const has8HrStringWithUnder1MinTotal = /\b0?8\s*(?:hr|h|hrs)\b/i.test(combinedOcrText) && parsedHeaderTotalSec < 60;
+            const isShiftSumAround8h = totalShiftSec >= 6 * 3600 && totalShiftSec <= 12 * 3600;
+            const hasShiftSumMismatch = isShiftSumAround8h && parsedHeaderTotalSec < 3600;
+
+            if (hasUnder1HourWithMultipleShifts || has8HrStringWithUnder1MinTotal || hasShiftSumMismatch) {
+                let mismatchReason = '';
+                if (has8HrStringWithUnder1MinTotal) {
+                    mismatchReason = `Timesheet text contains "08 hr" but parsed total is only ${formatHms(parsedHeaderTotalSec)} (< 1 min). Local OCR marked INVALID.`;
+                } else if (hasUnder1HourWithMultipleShifts) {
+                    mismatchReason = `${extractedShifts.length} work shifts detected summing to ~${Math.round(totalShiftSec / 3600)}h, but parsed header total is only ${formatHms(parsedHeaderTotalSec)} (< 1h). Local OCR marked INVALID.`;
+                } else {
+                    mismatchReason = `Shift intervals sum to ~${Math.round(totalShiftSec / 3600)}h (${formatHms(totalShiftSec)}), but parsed header total is < 1h (${formatHms(parsedHeaderTotalSec)}). Local OCR marked INVALID.`;
+                }
+
+                console.warn('snip8: Sanity check failed:', mismatchReason);
+                updateParseSourceBadge('parsing');
+
+                if (base64Image) {
+                    const handledByAi = await triggerAiValidationFallback(base64Image, mismatchReason);
+                    if (handledByAi) return;
+                }
+            }
+
             // OCR Validation Heuristic
             const fallbackCheck = Snip8Validation.shouldTriggerAiFallback({
                 rawText: cleaned,
                 parsedDurations,
                 totalTrackedSec,
-                detectedDays
+                detectedDays,
+                extractedShifts,
+                shiftSumSec: totalShiftSec
             });
 
             if (fallbackCheck.shouldFallback && base64Image) {
                 console.log('snip8: triggering AI Vision fallback:', fallbackCheck.reason);
+                updateParseSourceBadge('parsing');
                 const handledByAi = await triggerAiValidationFallback(base64Image, fallbackCheck.reason);
                 if (handledByAi) return;
             }
+
+            // Local OCR completed successfully
+            updateParseSourceBadge('ocr');
 
             if (aiValidationNotice) aiValidationNotice.classList.add('hidden');
             renderAll();
@@ -908,6 +1010,9 @@
             rawOcrText.textContent = '(No image scanned yet)';
             dashboard.classList.add('hidden');
             updateSessionMeta('cleared');
+            updateParseSourceBadge('reset');
+            window.lastUploadedTimesheet = null;
+            window.lastUploadedTimesheetBase64 = null;
             clearSyncUrl();
             closeSyncModal();
         });
@@ -930,6 +1035,53 @@
             renderAll();
             debouncedSaveSession();
         });
+
+        // Wire up manual override action: ✨ Re-parse with Gemini AI
+        if (forceAiBtn) {
+            forceAiBtn.addEventListener('click', async () => {
+                const targetImage = window.lastUploadedTimesheet;
+                const targetB64 = window.lastUploadedTimesheetBase64;
+                if (!targetImage && !targetB64) {
+                    alert('Please paste or upload a timesheet screenshot first before requesting Gemini AI parsing.');
+                    return;
+                }
+
+                const originalBtnHtml = forceAiBtn.innerHTML;
+                forceAiBtn.disabled = true;
+                forceAiBtn.innerHTML = `<span>⏳ Validating with Gemini AI...</span>`;
+                updateParseSourceBadge('parsing');
+
+                try {
+                    let b64 = null;
+                    if (typeof targetImage === 'string' && targetImage.startsWith('data:')) {
+                        b64 = targetImage;
+                    } else if (targetImage instanceof Blob || targetImage instanceof File) {
+                        b64 = await Snip8Validation.toBase64(targetImage);
+                    } else if (targetB64) {
+                        b64 = targetB64;
+                    }
+
+                    if (!b64) {
+                        throw new Error('Could not convert uploaded screenshot to base64.');
+                    }
+
+                    const handled = await triggerAiValidationFallback(b64, 'Manual override via "Re-parse with Gemini AI" button');
+                    if (handled) {
+                        await saveToNeon();
+                    } else {
+                        alert('Gemini AI validation could not process the timesheet. Check your network connection or API key.');
+                        updateParseSourceBadge('ocr');
+                    }
+                } catch (err) {
+                    console.error('snip8: forceAiBtn error', err);
+                    alert('Gemini AI re-scan failed: ' + (err.message || err));
+                    updateParseSourceBadge('ocr');
+                } finally {
+                    forceAiBtn.disabled = false;
+                    forceAiBtn.innerHTML = originalBtnHtml;
+                }
+            });
+        }
 
         // ===== Neon Database Persistence & Local Storage =====
         function updateNeonBadge(state, label) {

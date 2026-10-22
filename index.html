@@ -193,8 +193,9 @@
         <main id="dashboard" class="hidden space-y-5">
             <!-- Live Tracking Control Bar -->
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-900/60 border border-slate-800/80 px-4 py-2.5 rounded-xl">
-                <div class="flex items-center gap-2">
+                <div class="flex flex-wrap items-center gap-2">
                     <span class="text-xs font-semibold text-slate-300">Live Progress Tracking</span>
+                    <span id="parseSourceBadge" class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">Awaiting scan</span>
                     <span class="text-slate-600 hidden sm:inline">•</span>
                     <span class="text-[11px] text-slate-400">Tick logged hours upward while timer runs</span>
                 </div>
@@ -375,9 +376,14 @@
 
 
         <!-- Diagnostics / Raw OCR Log -->
-        <details class="text-xs text-slate-500 border-t border-slate-800/60 pt-2">
-            <summary class="cursor-pointer hover:text-slate-400 select-none">OCR Diagnostics / Raw Output</summary>
-            <div class="mt-2 p-3 bg-slate-900/80 rounded border border-slate-800 font-mono text-[11px] whitespace-pre-wrap text-slate-400"
+        <details class="text-xs text-slate-500 border-t border-slate-800/60 pt-2" open>
+            <div class="flex items-center justify-between gap-2">
+                <summary class="cursor-pointer hover:text-slate-400 select-none font-semibold text-slate-400">OCR Diagnostics / Raw Output</summary>
+                <button id="forceAiBtn" type="button" class="px-3 py-1.5 text-xs font-semibold rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex items-center gap-1.5 shadow-sm">
+                    ✨ Re-parse with Gemini AI
+                </button>
+            </div>
+            <div class="mt-2.5 p-3 bg-slate-900/80 rounded border border-slate-800 font-mono text-[11px] whitespace-pre-wrap text-slate-400"
                 id="rawOcrText">
                 (No image scanned yet)
             </div>
