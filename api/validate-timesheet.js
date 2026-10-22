@@ -31,18 +31,32 @@ async function callGeminiVision(base64Data, mimeType = 'image/png') {
 
     const prompt = `You are an expert timesheet validation assistant for "snip8".
 Analyze the provided timesheet screenshot (from Springboard, Clockify, Hubstaff, or similar).
-Extract the following:
-1. Total logged seconds for the active/selected work day (or total tracked time if only one duration is visible).
-2. The remaining seconds needed to hit an 8-hour daily cap (8 hours = 28,800 seconds). If logged >= 28800, remaining is 0.
-3. List of individual work shifts/intervals detected in the timesheet (start time, end time, and duration in minutes). If shift intervals are not explicitly listed with start/end, estimate or provide the overall active shift block.
-4. Your confidence level: "high", "medium", or "low".
-5. Explicit work date (YYYY-MM-DD) or day label (e.g. "Fri, 10/23" or "Thu 10/22") if visible.
+
+CRITICAL INSTRUCTIONS FOR DAY HEADER ROW:
+1. Carefully examine the top column header row or date banner of the timesheet crop (e.g. "Fri 10/23", "Fri, 10/23", "Thu 10/22", "10/23", etc.).
+2. Explicitly capture the day of the week and date from this top header row.
+3. In "dayLabel", return the day of week and date string from the header (e.g. "Fri, 10/23" or "Fri 10/23").
+4. In "work_date", return the date in YYYY-MM-DD format (e.g. "2026-10-23", assuming current year 2026 if year is omitted).
+
+CRITICAL INSTRUCTIONS FOR TIME & SHIFTS:
+5. Extract total logged seconds for the active day/column (or total tracked time if only one duration is visible).
+6. Remaining seconds needed to hit an 8-hour daily cap (8 hours = 28,800 seconds). If logged >= 28800, remaining is 0.
+7. List of individual work shifts/intervals detected in the timesheet (start time, end time, and duration in minutes).
+8. Confidence level: "high", "medium", or "low".
 
 Return your answer strictly according to the structured JSON schema.`;
 
     const schema = {
         type: 'object',
         properties: {
+            dayLabel: {
+                type: 'string',
+                description: 'Day of week and date captured directly from the top header row, e.g. "Fri 10/23" or "Fri, 10/23"'
+            },
+            work_date: {
+                type: 'string',
+                description: 'Explicit work date in YYYY-MM-DD format (e.g. "2026-10-23") derived from the top header row'
+            },
             loggedSeconds: { 
                 type: 'integer',
                 description: 'Total logged seconds for the current day'
@@ -50,14 +64,6 @@ Return your answer strictly according to the structured JSON schema.`;
             remainingSeconds: { 
                 type: 'integer',
                 description: 'Remaining seconds needed to reach 28800 seconds (8 hours)'
-            },
-            work_date: {
-                type: 'string',
-                description: 'Explicit work date in YYYY-MM-DD format if visible, or empty string if not found'
-            },
-            dayLabel: {
-                type: 'string',
-                description: 'Day label if visible in the timesheet, e.g. "Fri, 10/23" or "Thu 10/22", or empty string'
             },
             shifts: {
                 type: 'array',
@@ -78,7 +84,7 @@ Return your answer strictly according to the structured JSON schema.`;
                 description: 'Confidence level of the extraction'
             }
         },
-        required: ['loggedSeconds', 'remainingSeconds', 'shifts', 'confidence']
+        required: ['dayLabel', 'work_date', 'loggedSeconds', 'remainingSeconds', 'shifts', 'confidence']
     };
 
     let lastError = null;
@@ -175,15 +181,38 @@ export default async function handler(req, res) {
         }
 
         // Format timesheet data for snip8 compatibility
-        const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+        // Derive clean day label directly from Gemini's parsed header
+        let resolvedDayLabel = (validationResult.dayLabel || '').trim();
+        if (!resolvedDayLabel && validationResult.work_date) {
+            const parts = validationResult.work_date.split('-');
+            if (parts.length === 3) {
+                const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+                resolvedDayLabel = d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+            }
+        }
+        if (!resolvedDayLabel && body.work_date) {
+            const parts = body.work_date.split('-');
+            if (parts.length === 3) {
+                const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+                resolvedDayLabel = d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+            }
+        }
+        if (!resolvedDayLabel) {
+            const today = new Date();
+            resolvedDayLabel = today.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+        }
+
+        // Standardize format: e.g. "Fri 10/23" -> "Fri, 10/23"
+        const formattedLabel = resolvedDayLabel.replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b\s*(?!,)/i, '$1, ');
+
         const h = Math.floor(loggedSeconds / 3600);
         const m = Math.floor((loggedSeconds % 3600) / 60);
         const s = loggedSeconds % 60;
 
         const timesheetData = [
             {
-                label: `${todayLabel} (AI)`,
-                dayName: todayLabel.split(' ')[0],
+                label: `${formattedLabel} (AI)`,
+                dayName: formattedLabel.split(' ')[0].replace(/,/g, ''),
                 h, m, s,
                 sec: loggedSeconds,
                 shifts: validationResult.shifts || []
@@ -192,7 +221,14 @@ export default async function handler(req, res) {
 
         // 2. Persist directly to Neon if userPin is present
         let savedSession = null;
-        const workDate = body.work_date || validationResult.work_date || null;
+        const workDate = validationResult.work_date || body.work_date || null;
+        const payloadTimesheetData = {
+            dayLabel: formattedLabel,
+            workDate: workDate,
+            blocks: validationResult.shifts || [],
+            days: timesheetData
+        };
+
         if (userPin) {
             try {
                 savedSession = await upsertSession({
@@ -201,7 +237,7 @@ export default async function handler(req, res) {
                     total_seconds_remaining: remainingSeconds,
                     daily_cap_seconds: dailyCapSeconds,
                     logged_seconds: loggedSeconds,
-                    timesheet_data: timesheetData,
+                    timesheet_data: payloadTimesheetData,
                     last_scanned_image_url: null
                 });
             } catch (dbErr) {
@@ -216,8 +252,8 @@ export default async function handler(req, res) {
             success: true,
             validatedVia: 'AI',
             modelUsed,
-            work_date: validationResult.work_date || null,
-            dayLabel: validationResult.dayLabel || null,
+            work_date: workDate,
+            dayLabel: validationResult.dayLabel || formattedLabel,
             loggedSeconds,
             remainingSeconds,
             shifts: validationResult.shifts || [],

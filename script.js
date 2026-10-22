@@ -31,37 +31,195 @@
             loggedSeconds: 0,
             remainingSeconds: TARGET_DAILY_SEC,
             timesheetData: [],
+            detectedDays: [],
             isAiSyncing: false,
             lastScannedImageUrl: null
         };
         window.state = state;
 
-        function parseDateStringToYyyyMmDd(str) {
+        function extractDayHeaderAndDate(str) {
             if (!str || typeof str !== 'string') return null;
             const trimmed = str.trim();
-            // Check YYYY-MM-DD
-            const isoMatch = trimmed.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
-            if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
 
-            // Check MM/DD/YYYY or MM/DD/YY
-            const mdyMatch = trimmed.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
-            if (mdyMatch) {
-                let y = parseInt(mdyMatch[3], 10);
+            // 1. Day of week + date (e.g. "Fri 10/23", "Fri, 10/23", "Friday 10/23", "Thu 10/22")
+            const headerMatch = trimmed.match(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Man)[a-z]*[\s,]+(\d{1,2})[/\\](\d{1,2})(?:[/\\](\d{2,4}))?\b/i);
+            if (headerMatch) {
+                let dayName = headerMatch[1];
+                if (/^man$/i.test(dayName)) dayName = 'Mon';
+                const dayAbbr = dayName.charAt(0).toUpperCase() + dayName.slice(1, 3).toLowerCase();
+                const m = parseInt(headerMatch[2], 10);
+                const d = parseInt(headerMatch[3], 10);
+                let y = headerMatch[4] ? parseInt(headerMatch[4], 10) : new Date().getFullYear();
                 if (y < 100) y += 2000;
-                const m = String(parseInt(mdyMatch[1], 10)).padStart(2, '0');
-                const d = String(parseInt(mdyMatch[2], 10)).padStart(2, '0');
-                return `${y}-${m}-${d}`;
+                const workDate = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                const dayLabel = `${dayAbbr}, ${m}/${d}`;
+                return { workDate, dayLabel, dayName: dayAbbr };
             }
 
-            // Check Day MM/DD (e.g. "Fri, 10/23" or "Thu 10/22" or "10/23")
-            const mdMatch = trimmed.match(/(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)?(?:,|\s)*\b(\d{1,2})\/(\d{1,2})\b/i);
-            if (mdMatch) {
-                const y = new Date().getFullYear();
-                const m = String(parseInt(mdMatch[1], 10)).padStart(2, '0');
-                const d = String(parseInt(mdMatch[2], 10)).padStart(2, '0');
-                return `${y}-${m}-${d}`;
+            // 2. MM/DD or MM/DD/YYYY without day name (e.g. "10/23", "10/23/2026")
+            const dateMatch = trimmed.match(/\b(\d{1,2})[/\\](\d{1,2})(?:[/\\](\d{2,4}))?\b/);
+            if (dateMatch) {
+                const m = parseInt(dateMatch[1], 10);
+                const d = parseInt(dateMatch[2], 10);
+                let y = dateMatch[3] ? parseInt(dateMatch[3], 10) : new Date().getFullYear();
+                if (y < 100) y += 2000;
+                const dateObj = new Date(y, m - 1, d);
+                const dayAbbr = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+                const workDate = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                const dayLabel = `${dayAbbr}, ${m}/${d}`;
+                return { workDate, dayLabel, dayName: dayAbbr };
             }
+
+            // 3. YYYY-MM-DD
+            const isoMatch = trimmed.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+            if (isoMatch) {
+                const y = parseInt(isoMatch[1], 10);
+                const m = parseInt(isoMatch[2], 10);
+                const d = parseInt(isoMatch[3], 10);
+                const dateObj = new Date(y, m - 1, d);
+                const dayAbbr = dateObj.toLocaleDateString('en-US', { weekday: 'short' });
+                const workDate = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                const dayLabel = `${dayAbbr}, ${m}/${d}`;
+                return { workDate, dayLabel, dayName: dayAbbr };
+            }
+
             return null;
+        }
+
+        function parseDateStringToYyyyMmDd(str) {
+            const info = extractDayHeaderAndDate(str);
+            return info ? info.workDate : null;
+        }
+
+        function formatDayLabel(dateStr) {
+            if (!dateStr || typeof dateStr !== 'string') {
+                const now = new Date();
+                return now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+            }
+            const clean = dateStr.trim();
+            const headerInfo = extractDayHeaderAndDate(clean);
+            if (headerInfo) {
+                return headerInfo.dayLabel;
+            }
+            const parts = clean.split('-');
+            if (parts.length === 3) {
+                const y = parseInt(parts[0], 10);
+                const m = parseInt(parts[1], 10);
+                const d = parseInt(parts[2], 10);
+                const dateObj = new Date(y, m - 1, d);
+                if (!isNaN(dateObj.getTime())) {
+                    return dateObj.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                }
+            }
+            return clean;
+        }
+
+        function hydrateBreakdownFromTimesheetData(timesheetDataRaw, workDate, loggedSeconds) {
+            let raw = timesheetDataRaw;
+            if (typeof raw === 'string') {
+                try { raw = JSON.parse(raw); } catch (e) { raw = null; }
+            }
+
+            const fallbackLabel = formatDayLabel(workDate);
+            const fallbackDayName = fallbackLabel.split(' ')[0].replace(/,/g, '');
+            const logged = Math.max(0, Number(loggedSeconds) || 0);
+            const loggedH = Math.floor(logged / 3600);
+            const loggedM = Math.floor((logged % 3600) / 60);
+            const loggedS = logged % 60;
+
+            // 1. If timesheet_data is an object with dayLabel or days/blocks
+            if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+                const explicitLabel = (raw.dayLabel || formatDayLabel(raw.workDate || workDate)).trim();
+                const cleanLabel = explicitLabel || fallbackLabel;
+                const dayName = cleanLabel.split(' ')[0].replace(/,/g, '');
+
+                if (Array.isArray(raw.days) && raw.days.length > 0) {
+                    return raw.days.map((d, i) => {
+                        let dLabel = (d && d.label) ? String(d.label).trim() : (i === 0 ? cleanLabel : `Day ${i + 1}`);
+                        if (/^day\s*\d+$/i.test(dLabel) && i === 0) dLabel = cleanLabel;
+                        const h = Number(d && d.h) || 0;
+                        const m = Number(d && d.m) || 0;
+                        const s = Number(d && d.s) || 0;
+                        let sec = (d && d.sec !== undefined && d.sec !== null) ? Number(d.sec) : (h * 3600 + m * 60 + s);
+                        if (raw.days.length === 1 && sec === 0 && logged > 0) {
+                            sec = logged;
+                        }
+                        return {
+                            label: dLabel,
+                            dayName: String((d && d.dayName) || dayName),
+                            h: Math.floor(sec / 3600),
+                            m: Math.floor((sec % 3600) / 60),
+                            s: sec % 60,
+                            sec,
+                            shifts: (d && d.shifts) || raw.blocks || [],
+                            date: raw.workDate || workDate
+                        };
+                    });
+                }
+
+                return [{
+                    label: cleanLabel,
+                    dayName,
+                    h: loggedH,
+                    m: loggedM,
+                    s: loggedS,
+                    sec: logged,
+                    shifts: Array.isArray(raw.blocks) ? raw.blocks : [],
+                    date: raw.workDate || workDate
+                }];
+            }
+
+            // 2. If timesheet_data is an array
+            if (Array.isArray(raw) && raw.length > 0) {
+                // Check if items are shifts (have start/end/duration) rather than day objects
+                const isShiftArray = raw.every(item => item && (item.start !== undefined || item.duration !== undefined) && item.sec === undefined && item.h === undefined);
+                if (isShiftArray) {
+                    return [{
+                        label: fallbackLabel,
+                        dayName: fallbackDayName,
+                        h: loggedH,
+                        m: loggedM,
+                        s: loggedS,
+                        sec: logged,
+                        shifts: raw,
+                        date: workDate
+                    }];
+                }
+
+                return raw.map((d, i) => {
+                    let dLabel = (d && d.label) ? String(d.label).trim() : (i === 0 ? fallbackLabel : `Day ${i + 1}`);
+                    if (/^day\s*\d+$/i.test(dLabel) && i === 0) dLabel = fallbackLabel;
+                    const h = Number(d && d.h) || 0;
+                    const m = Number(d && d.m) || 0;
+                    const s = Number(d && d.s) || 0;
+                    let sec = (d && d.sec !== undefined && d.sec !== null) ? Number(d.sec) : (h * 3600 + m * 60 + s);
+                    if (raw.length === 1 && sec === 0 && logged > 0) {
+                        sec = logged;
+                    }
+                    return {
+                        label: dLabel,
+                        dayName: String((d && d.dayName) || fallbackDayName),
+                        h: Math.floor(sec / 3600),
+                        m: Math.floor((sec % 3600) / 60),
+                        s: sec % 60,
+                        sec,
+                        shifts: (d && d.shifts) || [],
+                        date: (d && d.date) || workDate
+                    };
+                });
+            }
+
+            // 3. Fallback when timesheet_data is empty
+            return [{
+                label: fallbackLabel,
+                dayName: fallbackDayName,
+                h: loggedH,
+                m: loggedM,
+                s: loggedS,
+                sec: logged,
+                shifts: [],
+                date: workDate
+            }];
         }
 
         // Live progress tracking baseline state
@@ -651,31 +809,34 @@
 
                     // Respect Extracted Date on Scan:
                     const todayStr = new Date().toLocaleDateString('en-CA');
-                    let detectedDate = null;
-                    if (aiResult.work_date) {
-                        detectedDate = parseDateStringToYyyyMmDd(aiResult.work_date);
+                    const now = new Date();
+                    const defaultTodayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+
+                    let headerInfo = null;
+                    if (aiResult.dayLabel) {
+                        headerInfo = extractDayHeaderAndDate(aiResult.dayLabel);
                     }
-                    if (!detectedDate && aiResult.dayLabel) {
-                        detectedDate = parseDateStringToYyyyMmDd(aiResult.dayLabel);
+                    if (!headerInfo && aiResult.work_date) {
+                        headerInfo = extractDayHeaderAndDate(aiResult.work_date);
                     }
-                    if (!detectedDate && Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
+                    if (!headerInfo && Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
                         for (const item of aiResult.timesheetData) {
                             if (item && item.label) {
-                                detectedDate = parseDateStringToYyyyMmDd(item.label);
-                                if (detectedDate) break;
+                                headerInfo = extractDayHeaderAndDate(item.label);
+                                if (headerInfo) break;
                             }
                         }
                     }
-                    state.workDate = detectedDate || todayStr;
+
+                    const resolvedWorkDate = headerInfo ? headerInfo.workDate : todayStr;
+                    const resolvedDayLabel = headerInfo ? headerInfo.dayLabel : defaultTodayLabel;
+                    const resolvedDayName = headerInfo ? headerInfo.dayName : defaultTodayLabel.split(' ')[0].replace(/,/g, '');
+
+                    state.workDate = resolvedWorkDate;
 
                     // 1. Update the master state directly
                     state.loggedSeconds = aiResult.loggedSeconds || 28805;
                     state.remainingSeconds = Math.max(0, 28800 - state.loggedSeconds);
-                    state.timesheetData = (Array.isArray(aiResult.shifts) && aiResult.shifts.length > 0)
-                        ? aiResult.shifts
-                        : (Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0
-                            ? aiResult.timesheetData
-                            : [{ h: 8, m: 0, s: 5 }]);
 
                     // Immediately cancel any pending debounced Neon save from previous OCR/ticker
                     if (neonSaveTimeout) {
@@ -689,14 +850,26 @@
                     const aiS = state.loggedSeconds % 60;
 
                     if (Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
-                        detectedDays = aiResult.timesheetData;
+                        detectedDays = aiResult.timesheetData.map((d, i) => {
+                            let label = (d && d.label) || `${resolvedDayLabel} (AI)`;
+                            if (i === 0) {
+                                label = `${resolvedDayLabel} (AI)`;
+                            }
+                            return {
+                                ...d,
+                                label,
+                                dayName: (d && d.dayName) || resolvedDayName,
+                                h: (d && d.h !== undefined) ? d.h : aiH,
+                                m: (d && d.m !== undefined) ? d.m : aiM,
+                                s: (d && d.s !== undefined) ? d.s : aiS,
+                                sec: (d && d.sec !== undefined) ? d.sec : state.loggedSeconds,
+                                shifts: (d && d.shifts) || aiResult.shifts || []
+                            };
+                        });
                     } else {
-                        const now = new Date();
-                        const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-                        const activeLabel = aiResult.dayLabel || todayLabel;
                         detectedDays = [{
-                            label: `${activeLabel} (AI)`,
-                            dayName: activeLabel.split(' ')[0],
+                            label: `${resolvedDayLabel} (AI)`,
+                            dayName: resolvedDayName,
                             h: aiH,
                             m: aiM,
                             s: aiS,
@@ -704,6 +877,9 @@
                             shifts: aiResult.shifts || []
                         }];
                     }
+
+                    // Master state timesheetData must be detectedDays with parsed day headers
+                    state.timesheetData = detectedDays;
 
                     selectedDayIndex = 0;
                     totalTrackedSec = state.loggedSeconds;
@@ -971,17 +1147,26 @@
 
             // Respect Extracted Date on Scan:
             const todayStr = new Date().toLocaleDateString('en-CA');
-            let detectedOcrDate = null;
+            let headerInfo = null;
             if (detectedDays[selectedDayIndex] && detectedDays[selectedDayIndex].label) {
-                detectedOcrDate = parseDateStringToYyyyMmDd(detectedDays[selectedDayIndex].label);
+                headerInfo = extractDayHeaderAndDate(detectedDays[selectedDayIndex].label);
             }
-            if (!detectedOcrDate && daysFound && daysFound.length > 0) {
-                detectedOcrDate = parseDateStringToYyyyMmDd(daysFound[0].label);
+            if (!headerInfo && daysFound && daysFound.length > 0) {
+                headerInfo = extractDayHeaderAndDate(daysFound[0].label);
             }
-            if (!detectedOcrDate) {
-                detectedOcrDate = parseDateStringToYyyyMmDd(rawText) || parseDateStringToYyyyMmDd(cleaned);
+            if (!headerInfo) {
+                headerInfo = extractDayHeaderAndDate(rawText) || extractDayHeaderAndDate(cleaned);
             }
-            state.workDate = detectedOcrDate || todayStr;
+
+            if (headerInfo) {
+                state.workDate = headerInfo.workDate;
+                if (detectedDays[selectedDayIndex]) {
+                    detectedDays[selectedDayIndex].label = headerInfo.dayLabel;
+                    detectedDays[selectedDayIndex].dayName = headerInfo.dayName;
+                }
+            } else {
+                state.workDate = todayStr;
+            }
 
             // 8. Reconcile Active Day with Total Tracked Time
             if (totalTrackedSec > 0 && detectedDays[selectedDayIndex]) {
@@ -1075,7 +1260,6 @@
                 : (detectedDays && detectedDays.length > 0
                     ? detectedDays
                     : [{ h: Math.floor(finalLoggedSec / 3600), m: Math.floor((finalLoggedSec % 3600) / 60), s: finalLoggedSec % 60 }]);
-            state.timesheetData = parsedShifts;
 
             // Ensure active day reflects finalLoggedSec
             if (detectedDays[selectedDayIndex]) {
@@ -1087,6 +1271,9 @@
                     detectedDays[selectedDayIndex].shifts = parsedShifts;
                 }
             }
+
+            // Master state timesheetData must be detectedDays with parsed day headers
+            state.timesheetData = detectedDays;
 
             baseTodaySec = finalLoggedSec;
             baseTotalTrackedSec = Math.max(totalTrackedSec, finalLoggedSec);
@@ -1104,9 +1291,9 @@
                 neonSaveTimeout = null;
             }
 
-            // Immediate Neon save with verified header total
+            // Immediate Neon save with verified header total and detectedDays
             setValidationProgress(85, 'Applying timesheet values & syncing...');
-            await saveSessionToNeon(finalLoggedSec, finalRemainingSec, parsedShifts);
+            await saveSessionToNeon(finalLoggedSec, finalRemainingSec, detectedDays);
             setValidationProgress(100, 'Timesheet successfully synced!', 'success');
 
             // Local OCR completed successfully
@@ -1289,6 +1476,11 @@
             updateSyncUrl();
             startCountdown();
         }
+
+        function renderTimesheetBreakdown(options = {}) {
+            renderAll(options);
+        }
+        window.renderTimesheetBreakdown = renderTimesheetBreakdown;
 
         function formatClock(date) {
             return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -1825,6 +2017,7 @@
             state.loggedSeconds = currentTodaySec;
             state.remainingSeconds = remSec;
             state.timesheetData = timesheetDataToSave;
+            state.detectedDays = detectedDays;
 
             const pin = state.userPin || getUserPin();
             state.userPin = pin;
@@ -1833,13 +2026,28 @@
             const workDate = targetScanDate;
             const imageUrl = overrideImageUrl || state.lastScannedImageUrl || null;
 
+            const activeDay = (detectedDays && detectedDays.length > selectedDayIndex && detectedDays[selectedDayIndex])
+                ? detectedDays[selectedDayIndex]
+                : (detectedDays && detectedDays[0]);
+
+            const cleanDayLabel = (activeDay && activeDay.label)
+                ? activeDay.label.replace(/\s*\(AI\)/i, '').trim()
+                : formatDayLabel(targetScanDate);
+
+            const payloadTimesheetData = {
+                dayLabel: cleanDayLabel,
+                workDate: targetScanDate,
+                blocks: (activeDay && activeDay.shifts) || [],
+                days: detectedDays
+            };
+
             const payload = {
                 user_pin: pin,
                 work_date: workDate,
                 total_seconds_remaining: remSec,
                 daily_cap_seconds: TARGET_DAILY_SEC,
                 logged_seconds: currentTodaySec,
-                timesheet_data: timesheetDataToSave,
+                timesheet_data: payloadTimesheetData,
                 last_scanned_image_url: imageUrl,
                 updated_at: new Date().toISOString()
             };
@@ -1853,9 +2061,12 @@
             // Separate Cache per Day:
             if (state.userPin && state.workDate) {
                 localStorage.setItem('snip8_cache_' + state.userPin + '_' + state.workDate, JSON.stringify(payload));
+                localStorage.setItem('snip8_detectedDays_' + state.userPin + '_' + state.workDate, JSON.stringify(detectedDays));
             } else if (pin) {
                 localStorage.setItem('snip8_cache_' + pin + '_' + payload.work_date, JSON.stringify(payload));
+                localStorage.setItem('snip8_detectedDays_' + pin + '_' + payload.work_date, JSON.stringify(detectedDays));
             }
+            localStorage.setItem('snip8_detectedDays', JSON.stringify(detectedDays));
             saveSession();
 
             if (!pin) {
@@ -2062,38 +2273,9 @@
                     } catch (e) { }
                 }
 
-                let days = row.timesheet_data;
-                if (typeof days === 'string') {
-                    try { days = JSON.parse(days); } catch (e) { days = []; }
-                }
-                state.timesheetData = Array.isArray(days) ? days : [];
-
-                if (state.timesheetData.length > 0) {
-                    detectedDays = state.timesheetData.map((d, i) => {
-                        const h = Number(d && d.h) || 0;
-                        const m = Number(d && d.m) || 0;
-                        const s = Number(d && d.s) || 0;
-                        return {
-                            label: String((d && d.label) || `Day ${i + 1}`),
-                            dayName: String((d && d.dayName) || ''),
-                            h, m, s,
-                            sec: (d.sec !== undefined && d.sec !== null) ? Number(d.sec) : (h * 3600 + m * 60 + s),
-                            shifts: d.shifts || []
-                        };
-                    });
-                } else if (logged > 0) {
-                    const now = new Date();
-                    const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-                    detectedDays = [{
-                        label: todayLabel,
-                        dayName: todayLabel.split(' ')[0],
-                        h: Math.floor(logged / 3600),
-                        m: Math.floor((logged % 3600) / 60),
-                        s: logged % 60,
-                        sec: logged,
-                        shifts: []
-                    }];
-                }
+                detectedDays = hydrateBreakdownFromTimesheetData(row.timesheet_data, state.workDate, logged);
+                state.detectedDays = detectedDays;
+                state.timesheetData = detectedDays;
 
                 selectedDayIndex = 0;
                 baseTodaySec = logged;
@@ -2109,7 +2291,7 @@
                     clearCountdownTimers();
                 }
 
-                renderAll({
+                renderTimesheetBreakdown({
                     restore: {
                         startTime: updatedAt.getTime(),
                         target,
@@ -2188,46 +2370,13 @@
                         renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
                     }
 
-                    let days = row.timesheet_data;
-                    if (typeof days === 'string') {
-                        try { days = JSON.parse(days); } catch (e) { days = []; }
-                    }
-                    state.timesheetData = Array.isArray(days) ? days : [];
-
-                    if (state.timesheetData.length > 0) {
-                        detectedDays = state.timesheetData.map((d, i) => {
-                            const h = Number(d && d.h) || 0;
-                            const m = Number(d && d.m) || 0;
-                            const s = Number(d && d.s) || 0;
-                            return {
-                                label: String((d && d.label) || `Day ${i + 1}`),
-                                dayName: String((d && d.dayName) || ''),
-                                h, m, s,
-                                sec: (d.sec !== undefined && d.sec !== null) ? Number(d.sec) : (h * 3600 + m * 60 + s),
-                                shifts: d.shifts || []
-                            };
-                        });
-                        selectedDayIndex = 0;
-                        baseTodaySec = dbLogged;
-                        baseTotalTrackedSec = Math.max(totalTrackedSec, dbLogged);
-                        totalTrackedSec = baseTotalTrackedSec;
-                    } else if (dbLogged > 0) {
-                        const now = new Date();
-                        const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-                        detectedDays = [{
-                            label: todayLabel,
-                            dayName: todayLabel.split(' ')[0],
-                            h: Math.floor(dbLogged / 3600),
-                            m: Math.floor((dbLogged % 3600) / 60),
-                            s: dbLogged % 60,
-                            sec: dbLogged,
-                            shifts: []
-                        }];
-                        selectedDayIndex = 0;
-                        baseTodaySec = dbLogged;
-                        baseTotalTrackedSec = Math.max(totalTrackedSec, dbLogged);
-                        totalTrackedSec = baseTotalTrackedSec;
-                    }
+                    detectedDays = hydrateBreakdownFromTimesheetData(row.timesheet_data, row.work_date || workDate, dbLogged);
+                    state.detectedDays = detectedDays;
+                    state.timesheetData = detectedDays;
+                    selectedDayIndex = 0;
+                    baseTodaySec = dbLogged;
+                    baseTotalTrackedSec = Math.max(totalTrackedSec, dbLogged);
+                    totalTrackedSec = baseTotalTrackedSec;
 
                     if (dbLogged >= TARGET_DAILY_SEC) {
                         timerCompleted = true;
@@ -2237,11 +2386,13 @@
 
                     // Update local cache to match the verified remote state
                     localStorage.setItem('snip8_cache_' + userPin + '_' + (row.work_date || workDate), JSON.stringify(row));
+                    localStorage.setItem('snip8_detectedDays_' + userPin + '_' + (row.work_date || workDate), JSON.stringify(detectedDays));
+                    localStorage.setItem('snip8_detectedDays', JSON.stringify(detectedDays));
                     saveSession();
 
                     const updatedAt = new Date(row.updated_at || Date.now());
                     const target = new Date(Date.now() + state.remainingSeconds * 1000);
-                    renderAll({
+                    renderTimesheetBreakdown({
                         restore: {
                             startTime: updatedAt.getTime(),
                             target,
@@ -2280,6 +2431,11 @@
             return await revalidateNeonSession(getUserPin(), getWorkDate());
         }
 
+        async function loadSessionFromNeon(userPin = getUserPin(), workDate = getWorkDate()) {
+            return await revalidateNeonSession(userPin, workDate);
+        }
+        window.loadSessionFromNeon = loadSessionFromNeon;
+
         // ===== Session Persistence (localStorage) =====
         function writeJSON(key, value) {
             localStorage.setItem(key, JSON.stringify(value));
@@ -2301,6 +2457,24 @@
 
                 const pin = state.userPin || getUserPin();
                 const workDate = state.workDate || getWorkDate();
+                const activeDay = (detectedDays && detectedDays.length > selectedDayIndex && detectedDays[selectedDayIndex])
+                    ? detectedDays[selectedDayIndex]
+                    : (detectedDays && detectedDays[0]);
+
+                const cleanDayLabel = (activeDay && activeDay.label)
+                    ? activeDay.label.replace(/\s*\(AI\)/i, '').trim()
+                    : formatDayLabel(workDate);
+
+                const payloadTimesheetData = {
+                    dayLabel: cleanDayLabel,
+                    workDate: workDate,
+                    blocks: (activeDay && activeDay.shifts) || [],
+                    days: detectedDays
+                };
+
+                state.detectedDays = detectedDays;
+                state.timesheetData = detectedDays;
+
                 if (pin && workDate) {
                     const cachePayload = {
                         user_pin: pin,
@@ -2308,11 +2482,12 @@
                         total_seconds_remaining: state.remainingSeconds,
                         daily_cap_seconds: TARGET_DAILY_SEC,
                         logged_seconds: state.loggedSeconds,
-                        timesheet_data: state.timesheetData && state.timesheetData.length ? state.timesheetData : detectedDays,
+                        timesheet_data: payloadTimesheetData,
                         last_scanned_image_url: state.lastScannedImageUrl || null,
                         updated_at: new Date().toISOString()
                     };
                     localStorage.setItem('snip8_cache_' + pin + '_' + workDate, JSON.stringify(cachePayload));
+                    localStorage.setItem('snip8_detectedDays_' + pin + '_' + workDate, JSON.stringify(detectedDays));
                 }
                 return true;
             } catch (e) {
@@ -2324,19 +2499,9 @@
         function loadSession() {
             try {
                 const days = readJSON(SESSION_KEYS.detectedDays);
-                if (!Array.isArray(days) || days.length === 0) return null;
-
-                const cleanDays = days.map((d, i) => {
-                    const h = Number(d && d.h) || 0;
-                    const m = Number(d && d.m) || 0;
-                    const s = Number(d && d.s) || 0;
-                    return {
-                        label: String((d && d.label) || `Day ${i + 1}`),
-                        dayName: String((d && d.dayName) || ''),
-                        h, m, s,
-                        sec: h * 3600 + m * 60 + s
-                    };
-                });
+                const workDate = state.workDate || getWorkDate();
+                const cleanDays = hydrateBreakdownFromTimesheetData(days, workDate, state.loggedSeconds);
+                if (!Array.isArray(cleanDays) || cleanDays.length === 0) return null;
 
                 const targetRaw = readJSON(SESSION_KEYS.targetTimestamp);
                 const updatedRaw = readJSON(SESSION_KEYS.lastUpdated);
@@ -2409,13 +2574,15 @@
             }
 
             detectedDays = session.detectedDays;
+            state.detectedDays = detectedDays;
+            state.timesheetData = detectedDays;
             selectedDayIndex = session.selectedDayIndex;
             totalTrackedSec = session.totalTrackedSec;
 
             const expiredMs = now - session.targetTimestamp;
             const acknowledged = session.alarmAckTarget === session.targetTimestamp.toISOString();
 
-            renderAll({
+            renderTimesheetBreakdown({
                 restore: {
                     startTime: session.lastUpdated.getTime(),
                     target: session.targetTimestamp,
