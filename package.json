@@ -9,6 +9,7 @@
   "dependencies": {
     "@google/genai": "^2.30.0",
     "@neondatabase/serverless": "^1.2.0",
+    "cloudinary": "^2.5.1",
     "dotenv": "^18.0.8"
   }
 }

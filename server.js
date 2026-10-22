@@ -5,6 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import sessionHandler from './api/snip8-session.js';
 import validateHandler from './api/validate-timesheet.js';
+import uploadScreenshotHandler from './api/upload-screenshot.js';
 import { initDb } from './db/neon.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -35,6 +36,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/validate-timesheet') {
         return validateHandler(req, res);
+    }
+    if (pathname === '/api/upload-screenshot') {
+        return uploadScreenshotHandler(req, res);
     }
 
     // Static File Serving

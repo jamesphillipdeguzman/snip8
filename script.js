@@ -27,7 +27,8 @@
             loggedSeconds: 0,
             remainingSeconds: TARGET_DAILY_SEC,
             timesheetData: [],
-            isAiSyncing: false
+            isAiSyncing: false,
+            lastScannedImageUrl: null
         };
         window.state = state;
 
@@ -434,6 +435,8 @@
             }
             if (base64Image) {
                 window.lastUploadedTimesheetBase64 = base64Image;
+                // Dispatch screenshot asynchronously to Cloudinary without blocking OCR or user interaction
+                uploadScreenshotToCloudinary(base64Image, getUserPin());
             }
 
             // 2. Fast Mobile Path: Skip heavy local Tesseract OCR on mobile and route directly to Gemini AI
@@ -507,6 +510,7 @@
             }
             if (base64Image) {
                 window.lastUploadedTimesheetBase64 = base64Image;
+                uploadScreenshotToCloudinary(base64Image, getUserPin());
             }
 
             try {
@@ -1386,6 +1390,7 @@
             updateParseSourceBadge('reset');
             window.lastUploadedTimesheet = null;
             window.lastUploadedTimesheetBase64 = null;
+            state.lastScannedImageUrl = null;
             clearSyncUrl();
             closeSyncModal();
         });
@@ -1553,11 +1558,50 @@
             }
         }
 
-        async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null, overrideTimesheetData = null) {
+        async function uploadScreenshotToCloudinary(base64Data, userPin) {
+            if (!base64Data || !userPin) return null;
+
+            try {
+                const res = await fetch('/api/upload-screenshot', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        imageBase64: base64Data,
+                        user_pin: userPin,
+                    }),
+                });
+
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+
+                if (data.secure_url) {
+                    state.lastScannedImageUrl = data.secure_url;
+                    try {
+                        localStorage.setItem(`snip8_last_img_${userPin}`, data.secure_url);
+                    } catch (e) { }
+
+                    // Update Neon immediately with the new image URL
+                    await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData, data.secure_url);
+                    return data.secure_url;
+                }
+            } catch (err) {
+                console.warn('Background Cloudinary upload failed:', err);
+            }
+            return null;
+        }
+        window.uploadScreenshotToCloudinary = uploadScreenshotToCloudinary;
+        const uploadScreenshotAsync = uploadScreenshotToCloudinary;
+        window.uploadScreenshotAsync = uploadScreenshotAsync;
+
+        async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null, overrideTimesheetData = null, overrideImageUrl = null) {
             // Cancel any pending debounced save so stale ticker/OCR cannot overwrite
             if (neonSaveTimeout) {
                 clearTimeout(neonSaveTimeout);
                 neonSaveTimeout = null;
+            }
+
+            if (overrideImageUrl) {
+                state.lastScannedImageUrl = overrideImageUrl;
             }
 
             const isExplicit = overrideLoggedSec !== null && overrideLoggedSec !== undefined;
@@ -1573,7 +1617,7 @@
                     : Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
                 timesheetDataToSave = overrideTimesheetData || (state.timesheetData && state.timesheetData.length ? state.timesheetData : detectedDays);
             } else {
-                if (detectedDays.length === 0 && !targetTimestamp) return;
+                if (detectedDays.length === 0 && !targetTimestamp && !state.lastScannedImageUrl && state.loggedSeconds === 0) return;
 
                 // Freeze on Cap: If daily cap has been reached or timer completed, do not increment further or decrease logged_seconds
                 if (state.loggedSeconds >= TARGET_DAILY_SEC || baseTodaySec >= TARGET_DAILY_SEC) {
@@ -1602,6 +1646,7 @@
 
             const pin = getUserPin();
             const workDate = getWorkDate();
+            const imageUrl = overrideImageUrl || state.lastScannedImageUrl || null;
 
             const payload = {
                 user_pin: pin,
@@ -1610,7 +1655,7 @@
                 daily_cap_seconds: TARGET_DAILY_SEC,
                 logged_seconds: currentTodaySec,
                 timesheet_data: timesheetDataToSave,
-                last_scanned_image_url: null,
+                last_scanned_image_url: imageUrl,
                 updated_at: new Date().toISOString()
             };
 
@@ -1688,6 +1733,14 @@
 
                 state.loggedSeconds = logged;
                 state.remainingSeconds = rem;
+                if (row.last_scanned_image_url) {
+                    state.lastScannedImageUrl = row.last_scanned_image_url;
+                } else {
+                    try {
+                        const localImg = localStorage.getItem(`snip8_last_img_${userPin}`);
+                        if (localImg) state.lastScannedImageUrl = localImg;
+                    } catch (e) { }
+                }
 
                 let days = row.timesheet_data;
                 if (typeof days === 'string') {
@@ -1805,6 +1858,9 @@
                     state.remainingSeconds = row.total_seconds_remaining !== undefined
                         ? Number(row.total_seconds_remaining)
                         : Math.max(0, TARGET_DAILY_SEC - dbLogged);
+                    if (row.last_scanned_image_url) {
+                        state.lastScannedImageUrl = row.last_scanned_image_url;
+                    }
 
                     let days = row.timesheet_data;
                     if (typeof days === 'string') {
@@ -1921,7 +1977,7 @@
                         daily_cap_seconds: TARGET_DAILY_SEC,
                         logged_seconds: state.loggedSeconds,
                         timesheet_data: state.timesheetData && state.timesheetData.length ? state.timesheetData : detectedDays,
-                        last_scanned_image_url: null,
+                        last_scanned_image_url: state.lastScannedImageUrl || null,
                         updated_at: new Date().toISOString()
                     };
                     localStorage.setItem(`snip8_cache_${pin}_${workDate}`, JSON.stringify(cachePayload));
@@ -2228,6 +2284,9 @@
                 }
 
                 if (navigator.onLine) {
+                    if (window.lastUploadedTimesheetBase64 && !state.lastScannedImageUrl) {
+                        uploadScreenshotToCloudinary(window.lastUploadedTimesheetBase64, enteredPin);
+                    }
                     await flushOfflineQueue();
                     await revalidateNeonSession(enteredPin, workDate);
                 } else {
