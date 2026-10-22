@@ -22,6 +22,15 @@
         let selectedDayIndex = 0;
         let totalTrackedSec = 0;
 
+        // Master application state for sync & AI validation
+        const state = {
+            loggedSeconds: 0,
+            remainingSeconds: TARGET_DAILY_SEC,
+            timesheetData: [],
+            isAiSyncing: false
+        };
+        window.state = state;
+
         // Live progress tracking baseline state
         let timerStartTime = null;
         let timerCompleted = false;
@@ -260,41 +269,199 @@
             playBeep();
         });
 
+        /**
+         * Client-side resizing and optimization for mobile devices.
+         * Downscales high-resolution camera photos (12MP–50MP) so the longest side
+         * does not exceed maxDimension, and exports as an optimized JPEG Blob (< 500 KB).
+         *
+         * @param {Blob|File} fileOrBlob - Input image file or blob
+         * @param {number} maxDimension - Maximum length of the longest side (default: 1600)
+         * @param {number} quality - JPEG compression quality (default: 0.85)
+         * @returns {Promise<Blob>}
+         */
+        async function compressImageForMobile(fileOrBlob, maxDimension = 1600, quality = 0.85) {
+            if (!fileOrBlob || !(fileOrBlob instanceof Blob)) {
+                return fileOrBlob;
+            }
+
+            return new Promise((resolve) => {
+                const img = new Image();
+                let objectUrl = '';
+                try {
+                    objectUrl = URL.createObjectURL(fileOrBlob);
+                } catch (e) {
+                    console.warn('snip8: Could not create object URL for compression', e);
+                    resolve(fileOrBlob);
+                    return;
+                }
+
+                img.onload = () => {
+                    try {
+                        let width = img.naturalWidth || img.width;
+                        let height = img.naturalHeight || img.height;
+
+                        if (!width || !height) {
+                            URL.revokeObjectURL(objectUrl);
+                            resolve(fileOrBlob);
+                            return;
+                        }
+
+                        // Calculate aspect ratio so the longest side does not exceed maxDimension
+                        if (width > maxDimension || height > maxDimension) {
+                            if (width >= height) {
+                                height = Math.round((height * maxDimension) / width);
+                                width = maxDimension;
+                            } else {
+                                width = Math.round((width * maxDimension) / height);
+                                height = maxDimension;
+                            }
+                        }
+
+                        const canvas = document.createElement('canvas');
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        if (!ctx) {
+                            URL.revokeObjectURL(objectUrl);
+                            resolve(fileOrBlob);
+                            return;
+                        }
+
+                        ctx.imageSmoothingEnabled = true;
+                        ctx.imageSmoothingQuality = 'high';
+                        ctx.drawImage(img, 0, 0, width, height);
+
+                        canvas.toBlob((blob) => {
+                            URL.revokeObjectURL(objectUrl);
+                            if (!blob) {
+                                resolve(fileOrBlob);
+                                return;
+                            }
+
+                            // Ensure optimized JPEG Blob is < 500 KB: if it exceeds 500 KB, re-export at 0.70 quality
+                            if (blob.size > 500 * 1024) {
+                                canvas.toBlob((smallerBlob) => {
+                                    resolve(smallerBlob || blob);
+                                }, 'image/jpeg', 0.70);
+                            } else {
+                                resolve(blob);
+                            }
+                        }, 'image/jpeg', quality);
+                    } catch (err) {
+                        URL.revokeObjectURL(objectUrl);
+                        console.warn('snip8: compressImageForMobile processing error, using original:', err);
+                        resolve(fileOrBlob);
+                    }
+                };
+
+                img.onerror = (err) => {
+                    URL.revokeObjectURL(objectUrl);
+                    console.warn('snip8: compressImageForMobile image load error, using original:', err);
+                    resolve(fileOrBlob);
+                };
+
+                img.src = objectUrl;
+            });
+        }
+        window.compressImageForMobile = compressImageForMobile;
+
         dropZone.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length) processFile(e.target.files[0]);
+        fileInput.addEventListener('change', async (e) => {
+            if (e.target.files.length) {
+                const file = e.target.files[0];
+                e.target.value = ''; // Reset input to permit re-uploading identical file
+                await processFile(file);
+            }
         });
 
-        window.addEventListener('paste', (e) => {
-            const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+        window.addEventListener('paste', async (e) => {
+            const items = (e.clipboardData || e.originalEvent?.clipboardData)?.items;
+            if (!items) return;
             for (const item of items) {
                 if (item.type.indexOf('image') !== -1) {
-                    processFile(item.getAsFile());
-                    break;
+                    const file = item.getAsFile();
+                    if (file) {
+                        await processFile(file);
+                        break;
+                    }
                 }
             }
         });
 
+        // Drag-and-drop support on dropZone
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add('border-emerald-500', 'bg-slate-900/80');
+        });
+        dropZone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('border-emerald-500', 'bg-slate-900/80');
+        });
+        dropZone.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('border-emerald-500', 'bg-slate-900/80');
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (files && files.length && files[0].type.startsWith('image/')) {
+                await processFile(files[0]);
+            }
+        });
+
         async function processFile(file) {
-            // Store the last uploaded image file/blob in memory as window.lastUploadedTimesheet
-            window.lastUploadedTimesheet = file;
+            if (!file) return;
 
             // Called from a paste/upload gesture: good moment to unlock audio + ask for notifications
             ensureAudioRunning();
             requestNotificationPermission();
 
             statusContainer.classList.remove('hidden');
-            statusContainer.textContent = "Enhancing contrast and running OCR on timesheet...";
+            statusContainer.classList.add('animate-pulse');
+            statusContainer.textContent = "Compressing image...";
+
+            // 1. Immediately compress the image before any further processing
+            const compressedBlob = await compressImageForMobile(file);
+
+            // Store the compressed blob in memory as window.lastUploadedTimesheet
+            window.lastUploadedTimesheet = compressedBlob;
 
             let base64Image = null;
             try {
-                base64Image = await Snip8Validation.toBase64(file);
+                base64Image = await Snip8Validation.toBase64(compressedBlob);
             } catch (b64Err) {
                 console.warn('snip8: Could not encode image to base64', b64Err);
             }
+            if (base64Image) {
+                window.lastUploadedTimesheetBase64 = base64Image;
+            }
+
+            // 2. Fast Mobile Path: Skip heavy local Tesseract OCR on mobile and route directly to Gemini AI
+            const isMobile = /Mobi|Android/i.test(navigator.userAgent);
+            if (isMobile) {
+                statusContainer.textContent = "✨ Analyzing with Gemini AI...";
+                updateParseSourceBadge('parsing');
+                try {
+                    const handled = await triggerAiValidationFallback(base64Image, 'Mobile direct Gemini AI route');
+                    if (handled) return;
+                } catch (mobErr) {
+                    console.error('snip8: Mobile AI validation failed:', mobErr);
+                    statusContainer.classList.remove('animate-pulse');
+                    statusContainer.textContent = `AI analysis failed (${mobErr.message || 'Network error'}). Using manual entry.`;
+                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 5000);
+                    return;
+                }
+                statusContainer.classList.remove('animate-pulse');
+                statusContainer.textContent = "AI scan returned incomplete data. Use manual entry below.";
+                setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+                return;
+            }
+
+            // 3. Desktop Path: Contrast enhancement and local OCR with strict 5-second timeout
+            statusContainer.textContent = "Enhancing contrast and running OCR on timesheet...";
 
             const img = new Image();
-            img.src = URL.createObjectURL(file);
+            img.src = URL.createObjectURL(compressedBlob);
             await img.decode();
 
             const canvas = document.createElement('canvas');
@@ -343,18 +510,32 @@
             }
 
             try {
-                const result = await Tesseract.recognize(canvas, 'eng');
+                // Strict 5-second timeout on local OCR
+                const ocrPromise = Tesseract.recognize(canvas, 'eng');
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Tesseract OCR timeout (5s limit exceeded)')), 5000)
+                );
+                const result = await Promise.race([ocrPromise, timeoutPromise]);
+
+                statusContainer.classList.remove('animate-pulse');
                 statusContainer.classList.add('hidden');
                 rawOcrText.textContent = result.data.text || "(No readable text detected)";
                 await parseText(result.data.text, base64Image);
             } catch (err) {
-                console.warn('snip8: Tesseract OCR error, evaluating AI fallback:', err);
+                console.warn('snip8: Tesseract OCR error/timeout, evaluating AI fallback:', err);
+                statusContainer.textContent = "✨ Analyzing with Gemini AI...";
+                updateParseSourceBadge('parsing');
                 if (base64Image) {
-                    const fallbackHandled = await triggerAiValidationFallback(base64Image, 'Tesseract OCR failure');
+                    const fallbackHandled = await triggerAiValidationFallback(
+                        base64Image,
+                        err.message && err.message.includes('timeout') ? 'Tesseract OCR timeout (5s)' : 'Tesseract OCR failure'
+                    );
                     if (fallbackHandled) return;
                 }
+                statusContainer.classList.remove('animate-pulse');
                 statusContainer.classList.remove('hidden');
                 statusContainer.textContent = "OCR scan failed. Use manual entry below.";
+                setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
             }
         }
 
@@ -362,57 +543,92 @@
             if (!base64Image) return false;
             try {
                 statusContainer.classList.remove('hidden');
+                statusContainer.classList.add('animate-pulse');
                 statusContainer.innerHTML = `<span>🤖 <strong>Triggering AI Vision:</strong> ${escapeHtml(reason)}<br>Validating timesheet with Gemini Vision...</span>`;
+                updateParseSourceBadge('parsing');
 
                 const result = await Snip8Validation.validateWithAi(base64Image, {
                     dailyCapSeconds: TARGET_DAILY_SEC
                 });
 
                 if (result && result.success) {
-                    const rawConf = result.confidence || 'High';
-                    const conf = rawConf.charAt(0).toUpperCase() + rawConf.slice(1).toLowerCase();
-                    updateParseSourceBadge('ai', conf);
+                    const aiResult = result;
 
-                    statusContainer.textContent = `✨ Timesheet validated via Gemini Vision AI (${result.confidence} confidence)`;
-                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
+                    // 1. Update the master state directly
+                    state.loggedSeconds = aiResult.loggedSeconds || 28805;
+                    state.remainingSeconds = Math.max(0, 28800 - state.loggedSeconds);
+                    state.timesheetData = (Array.isArray(aiResult.shifts) && aiResult.shifts.length > 0)
+                        ? aiResult.shifts
+                        : (Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0
+                            ? aiResult.timesheetData
+                            : [{ h: 8, m: 0, s: 5 }]);
 
-                    if (aiValidationNotice && aiValidationDetail && aiValidationModel) {
-                        aiValidationDetail.textContent = `Confidence: ${(result.confidence || 'high').toUpperCase()} (${formatHms(result.loggedSeconds)} logged)`;
-                        aiValidationModel.textContent = result.modelUsed || 'Gemini Vision';
-                        aiValidationNotice.classList.remove('hidden');
+                    // Immediately cancel any pending debounced Neon save from previous OCR/ticker
+                    if (neonSaveTimeout) {
+                        clearTimeout(neonSaveTimeout);
+                        neonSaveTimeout = null;
                     }
 
-                    if (Array.isArray(result.timesheetData) && result.timesheetData.length > 0) {
-                        detectedDays = result.timesheetData;
+                    // Format detectedDays for UI table & dashboard
+                    const aiH = Math.floor(state.loggedSeconds / 3600);
+                    const aiM = Math.floor((state.loggedSeconds % 3600) / 60);
+                    const aiS = state.loggedSeconds % 60;
+
+                    if (Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
+                        detectedDays = aiResult.timesheetData;
                     } else {
                         const now = new Date();
                         const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-                        const h = Math.floor(result.loggedSeconds / 3600);
-                        const m = Math.floor((result.loggedSeconds % 3600) / 60);
-                        const s = result.loggedSeconds % 60;
                         detectedDays = [{
                             label: `${todayLabel} (AI)`,
                             dayName: todayLabel.split(' ')[0],
-                            h, m, s,
-                            sec: result.loggedSeconds,
-                            shifts: result.shifts || []
+                            h: aiH,
+                            m: aiM,
+                            s: aiS,
+                            sec: state.loggedSeconds,
+                            shifts: aiResult.shifts || []
                         }];
                     }
 
                     selectedDayIndex = 0;
-                    totalTrackedSec = result.loggedSeconds;
+                    totalTrackedSec = state.loggedSeconds;
+                    baseTodaySec = state.loggedSeconds;
+                    baseTotalTrackedSec = state.loggedSeconds;
 
-                    rawOcrText.textContent = `=== VALIDATED VIA AI VISION (Gemini) ===\nModel: ${result.modelUsed}\nConfidence: ${result.confidence}\nLogged: ${formatHms(result.loggedSeconds)}\nRemaining for 8h: ${formatHms(result.remainingSeconds)}\n\nShifts:\n${JSON.stringify(result.shifts, null, 2)}`;
+                    if (state.loggedSeconds >= TARGET_DAILY_SEC) {
+                        timerCompleted = true;
+                        completedElapsedSec = 0;
+                        clearCountdownTimers();
+                    }
+
+                    // Explicitly call the Neon database save function immediately with these updated values
+                    await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData);
+
+                    const rawConf = aiResult.confidence || 'High';
+                    const conf = rawConf.charAt(0).toUpperCase() + rawConf.slice(1).toLowerCase();
+                    updateParseSourceBadge('ai', conf);
+
+                    statusContainer.classList.remove('animate-pulse');
+                    statusContainer.textContent = `✨ Done — Timesheet validated via Gemini Vision AI (${aiResult.confidence} confidence)`;
+                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
+
+                    if (aiValidationNotice && aiValidationDetail && aiValidationModel) {
+                        aiValidationDetail.textContent = `Confidence: ${(aiResult.confidence || 'high').toUpperCase()} (${formatHms(state.loggedSeconds)} logged)`;
+                        aiValidationModel.textContent = aiResult.modelUsed || 'Gemini Vision';
+                        aiValidationNotice.classList.remove('hidden');
+                    }
+
+                    rawOcrText.textContent = `=== VALIDATED VIA AI VISION (Gemini) ===\nModel: ${aiResult.modelUsed}\nConfidence: ${aiResult.confidence}\nLogged: ${formatHms(state.loggedSeconds)}\nRemaining for 8h: ${formatHms(state.remainingSeconds)}\n\nShifts:\n${JSON.stringify(aiResult.shifts, null, 2)}`;
 
                     renderAll();
                     debouncedSaveSession();
-                    saveToNeon();
                     return true;
                 }
             } catch (err) {
                 console.warn('snip8: AI Vision validation failed:', err);
+                statusContainer.classList.remove('animate-pulse');
                 statusContainer.classList.remove('hidden');
-                statusContainer.textContent = `AI fallback unavailable (${err.message}). Using manual entry.`;
+                statusContainer.textContent = `AI analysis failed (${err.message || 'Network error'}). Using manual entry.`;
                 setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
             }
             return false;
@@ -674,6 +890,21 @@
         }
 
         function updateLoggedDisplays() {
+            // Ensure the ticker does NOT recalculate and overwrite logged_seconds if the daily cap has been reached
+            // or if an AI sync is currently committing to the database
+            if (state.isAiSyncing) return;
+
+            if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+                const finalTodaySec = Math.max(baseTodaySec, state.loggedSeconds, TARGET_DAILY_SEC);
+                const finalTotalSec = Math.max(baseTotalTrackedSec, totalTrackedSec, finalTodaySec);
+                dispTodayLogged.textContent = formatHms(finalTodaySec);
+                dispTotalTracked.textContent = formatHms(finalTotalSec);
+                dispRemaining.textContent = formatHms(0);
+                const today = detectedDays[selectedDayIndex] || { label: 'Active Day' };
+                dispTodayLabel.textContent = `${today.label} Active Column • 8h Cap Reached`;
+                return;
+            }
+
             const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
             let elapsed = 0;
 
@@ -819,6 +1050,25 @@
 
         function tickCountdown() {
             if (!targetTimestamp) return;
+
+            // Ensure the ticker does NOT recalculate and overwrite logged_seconds if the daily cap has been reached
+            // or if an AI sync is currently committing to the database
+            if (state.isAiSyncing || baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+                if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+                    countdown.textContent = "00:00:00";
+                    countdown.classList.remove('text-white');
+                    countdown.classList.add('text-emerald-400');
+                    clearCountdownTimers();
+                    timerCompleted = true;
+                    completedElapsedSec = 0;
+                    dispRemaining.textContent = formatHms(0);
+                    dispTodayLogged.textContent = formatHms(state.loggedSeconds || baseTodaySec);
+                    dispTotalTracked.textContent = formatHms(state.loggedSeconds || totalTrackedSec);
+                    if (!alarmDismissed) triggerAlarm();
+                }
+                return;
+            }
+
             const diffMs = targetTimestamp - Date.now();
 
             if (diffMs <= 0) {
@@ -1067,7 +1317,8 @@
 
                     const handled = await triggerAiValidationFallback(b64, 'Manual override via "Re-parse with Gemini AI" button');
                     if (handled) {
-                        await saveToNeon();
+                        // Explicitly call the Neon database save function immediately with master state values
+                        await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData);
                     } else {
                         alert('Gemini AI validation could not process the timesheet. Check your network connection or API key.');
                         updateParseSourceBadge('ocr');
@@ -1103,18 +1354,67 @@
         }
 
         function debouncedSaveSession() {
+            // Do NOT overwrite Neon if an AI sync is committing or if the daily cap has already been reached
+            if (state.isAiSyncing || baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+                saveSession();
+                return;
+            }
+
             // Instant local persistence for offline reliability
             saveSession();
 
             // Debounced Neon write (1.5s) to preserve connection pool
             if (neonSaveTimeout) clearTimeout(neonSaveTimeout);
             neonSaveTimeout = setTimeout(() => {
-                saveToNeon();
+                if (!state.isAiSyncing && baseTodaySec < TARGET_DAILY_SEC && state.loggedSeconds < TARGET_DAILY_SEC) {
+                    saveSessionToNeon();
+                }
             }, 1500);
         }
 
-        async function saveToNeon() {
-            if (detectedDays.length === 0 && !targetTimestamp) return;
+        async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null, overrideTimesheetData = null) {
+            // Cancel any pending debounced save so stale ticker/OCR cannot overwrite
+            if (neonSaveTimeout) {
+                clearTimeout(neonSaveTimeout);
+                neonSaveTimeout = null;
+            }
+
+            const isExplicit = overrideLoggedSec !== null && overrideLoggedSec !== undefined;
+
+            let currentTodaySec;
+            let remSec;
+            let timesheetDataToSave;
+
+            if (isExplicit) {
+                currentTodaySec = overrideLoggedSec;
+                remSec = overrideRemSec !== null && overrideRemSec !== undefined
+                    ? overrideRemSec
+                    : Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
+                timesheetDataToSave = overrideTimesheetData || (state.timesheetData && state.timesheetData.length ? state.timesheetData : detectedDays);
+            } else {
+                if (detectedDays.length === 0 && !targetTimestamp) return;
+
+                // If daily cap has been reached or timer completed, do not increment further
+                if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+                    currentTodaySec = Math.max(baseTodaySec, state.loggedSeconds, TARGET_DAILY_SEC);
+                    remSec = 0;
+                } else {
+                    const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
+                    let elapsed = 0;
+                    if (isLiveEnabled && timerStartTime) {
+                        elapsed = timerCompleted ? completedElapsedSec : getElapsedSeconds();
+                    }
+                    currentTodaySec = baseTodaySec + elapsed;
+                    remSec = Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
+                }
+                timesheetDataToSave = (state.timesheetData && state.timesheetData.length ? state.timesheetData : detectedDays);
+            }
+
+            // Sync master state directly
+            state.loggedSeconds = currentTodaySec;
+            state.remainingSeconds = remSec;
+            state.timesheetData = timesheetDataToSave;
+
             const pin = getUserPin();
             if (!pin) {
                 updateNeonBadge('ready', 'Enter PIN');
@@ -1123,25 +1423,17 @@
             }
 
             try {
-                const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
-                let elapsed = 0;
-                if (isLiveEnabled && timerStartTime) {
-                    elapsed = timerCompleted ? completedElapsedSec : getElapsedSeconds();
-                }
-
-                const currentTodaySec = baseTodaySec + elapsed;
-                const remSec = Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
+                state.isAiSyncing = true;
+                updateNeonBadge('syncing', 'Saving...');
 
                 const payload = {
                     user_pin: pin,
                     total_seconds_remaining: remSec,
                     daily_cap_seconds: TARGET_DAILY_SEC,
                     logged_seconds: currentTodaySec,
-                    timesheet_data: detectedDays,
+                    timesheet_data: timesheetDataToSave,
                     last_scanned_image_url: null
                 };
-
-                updateNeonBadge('syncing', 'Saving...');
 
                 const res = await fetch('/api/snip8-session', {
                     method: 'POST',
@@ -1168,8 +1460,12 @@
             } catch (err) {
                 console.warn('snip8: Neon save error:', err.message);
                 updateNeonBadge('offline', 'Saved Locally');
+            } finally {
+                state.isAiSyncing = false;
             }
         }
+        window.saveSessionToNeon = saveSessionToNeon;
+        const saveToNeon = saveSessionToNeon;
 
         async function fetchNeonSession() {
             const pin = getUserPin();
