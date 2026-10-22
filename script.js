@@ -30,10 +30,19 @@
             workDate: new Date().toLocaleDateString('en-CA'), // 'YYYY-MM-DD' in local time
             loggedSeconds: 0,
             remainingSeconds: TARGET_DAILY_SEC,
+            dailyCapSeconds: TARGET_DAILY_SEC,
             timesheetData: [],
             detectedDays: [],
             isAiSyncing: false,
-            lastScannedImageUrl: null
+            isTabActive: true,
+            tickerInterval: null,
+            lastScannedImageUrl: null,
+            get totalLoggedSeconds() {
+                return this.loggedSeconds;
+            },
+            set totalLoggedSeconds(val) {
+                this.loggedSeconds = Number(val) || 0;
+            }
         };
         window.state = state;
 
@@ -1493,6 +1502,8 @@
         function clearCountdownTimers() {
             if (countdownInterval) clearInterval(countdownInterval);
             countdownInterval = null;
+            window.liveTimerInterval = null;
+            state.tickerInterval = null;
             if (deadlineTimeout) clearTimeout(deadlineTimeout);
             deadlineTimeout = null;
             if (periodicSyncInterval) clearInterval(periodicSyncInterval);
@@ -1556,6 +1567,9 @@
             countdown.classList.add('text-white');
 
             countdownInterval = setInterval(tickCountdown, 1000);
+            window.liveTimerInterval = countdownInterval;
+            state.tickerInterval = countdownInterval;
+
             // One-shot deadline timer: background tabs throttle repeating intervals (down to ~1/min),
             // while a single non-chained timeout is much more likely to fire on time.
             const remainingMs = targetTimestamp - Date.now();
@@ -1571,9 +1585,157 @@
             tickCountdown();
         }
 
-        // Catch up immediately when the tab becomes visible again
+        // ===== Silent Background Sync & Mobile/Desktop Handoff =====
+        let lastForegroundSyncTime = 0;
+
+        function handleGoingToBackground() {
+            state.isTabActive = false;
+
+            const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
+            let elapsed = 0;
+            if (isLiveEnabled && timerStartTime && !timerCompleted) {
+                elapsed = getElapsedSeconds();
+                baseTodaySec += elapsed;
+                baseTotalTrackedSec += elapsed;
+                state.loggedSeconds = baseTodaySec;
+                state.totalLoggedSeconds = baseTodaySec;
+                state.remainingSeconds = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - baseTodaySec);
+                timerStartTime = null;
+
+                if (detectedDays[selectedDayIndex]) {
+                    detectedDays[selectedDayIndex].sec = baseTodaySec;
+                    detectedDays[selectedDayIndex].h = Math.floor(baseTodaySec / 3600);
+                    detectedDays[selectedDayIndex].m = Math.floor((baseTodaySec % 3600) / 60);
+                    detectedDays[selectedDayIndex].s = baseTodaySec % 60;
+                }
+            }
+
+            // Halt local interval tickers immediately to eliminate background clock drift
+            clearCountdownTimers();
+
+            // Commit pending debounced saves or elapsed seconds immediately via keepalive
+            if (neonSaveTimeout || elapsed > 0) {
+                if (neonSaveTimeout) {
+                    clearTimeout(neonSaveTimeout);
+                    neonSaveTimeout = null;
+                }
+                saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { keepalive: true, silent: true });
+            } else {
+                saveSession();
+            }
+        }
+
+        async function handleReturningToForeground() {
+            if (document.hidden) return;
+            state.isTabActive = true;
+
+            const now = Date.now();
+            if (now - lastForegroundSyncTime < 800) {
+                return;
+            }
+            lastForegroundSyncTime = now;
+
+            const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
+            const currentLogged = state.totalLoggedSeconds || state.loggedSeconds || baseTodaySec;
+            const dailyCap = state.dailyCapSeconds || TARGET_DAILY_SEC;
+
+            // 1. Seamlessly resume local ticker if enabled and daily cap not reached
+            if (isLiveEnabled && currentLogged < dailyCap && !timerCompleted) {
+                timerStartTime = Date.now();
+                const remSec = Math.max(0, dailyCap - baseTodaySec);
+                targetTimestamp = new Date(timerStartTime + remSec * 1000);
+                startCountdown();
+                updateStopTimeDisplay();
+                updateLoggedDisplays();
+            }
+
+            // 2. Perform silent, non-blocking fetch to check for handoff / progress from another device
+            const pin = state.userPin || getUserPin();
+            const date = state.workDate || getWorkDate();
+            if (!pin || !navigator.onLine) return;
+
+            try {
+                const url = `/api/snip8-session?pin=${encodeURIComponent(pin)}&date=${encodeURIComponent(date)}`;
+                const res = await fetch(url, {
+                    headers: {
+                        'x-user-pin': pin
+                    }
+                });
+
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+
+                const data = await res.json();
+                const row = data?.row || data?.session;
+
+                if (row && !row.is_fresh_default) {
+                    const remoteLogged = Number(row.logged_seconds) || 0;
+
+                    // Monotonic fast-forward: if another device progressed further, silently update
+                    if (remoteLogged > (state.totalLoggedSeconds || state.loggedSeconds || 0)) {
+                        state.totalLoggedSeconds = remoteLogged;
+                        state.loggedSeconds = remoteLogged;
+                        state.remainingSeconds = Math.max(0, dailyCap - remoteLogged);
+
+                        baseTodaySec = remoteLogged;
+                        baseTotalTrackedSec = Math.max(baseTotalTrackedSec, remoteLogged);
+                        totalTrackedSec = baseTotalTrackedSec;
+
+                        detectedDays = hydrateBreakdownFromTimesheetData(row.timesheet_data, row.work_date || date, remoteLogged);
+                        state.detectedDays = detectedDays;
+                        state.timesheetData = detectedDays;
+
+                        if (row.last_scanned_image_url) {
+                            state.lastScannedImageUrl = row.last_scanned_image_url;
+                            renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
+                        }
+
+                        if (remoteLogged >= dailyCap) {
+                            timerCompleted = true;
+                            clearCountdownTimers();
+                        } else if (isLiveEnabled) {
+                            timerStartTime = Date.now();
+                            targetTimestamp = new Date(timerStartTime + state.remainingSeconds * 1000);
+                            startCountdown();
+                            updateStopTimeDisplay();
+                        }
+
+                        // Re-render UI counters & table breakdown without reloading
+                        renderTimesheetBreakdown({
+                            restore: {
+                                startTime: timerStartTime || Date.now(),
+                                target: targetTimestamp || new Date(),
+                                alarmDismissed: state.remainingSeconds <= 0
+                            }
+                        });
+                        updateLoggedDisplays();
+
+                        // Persist to local cache
+                        localStorage.setItem('snip8_cache_' + pin + '_' + (row.work_date || date), JSON.stringify(row));
+                        localStorage.setItem('snip8_detectedDays_' + pin + '_' + (row.work_date || date), JSON.stringify(detectedDays));
+                        saveSession();
+                    }
+                }
+            } catch (err) {
+                console.warn('snip8: silent background handoff sync warning:', err.message || err);
+            }
+        }
+
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible' && countdownInterval) tickCountdown();
+            if (document.hidden) {
+                handleGoingToBackground();
+            } else {
+                handleReturningToForeground();
+            }
+        });
+
+        window.addEventListener('pagehide', () => {
+            handleGoingToBackground();
+        });
+
+        window.addEventListener('pageshow', () => {
+            handleReturningToForeground();
         });
 
         async function triggerAlarm() {
@@ -1967,7 +2129,7 @@
         const uploadScreenshotAsync = uploadScreenshotToCloudinary;
         window.uploadScreenshotAsync = uploadScreenshotAsync;
 
-        async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null, overrideTimesheetData = null, overrideImageUrl = null) {
+        async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null, overrideTimesheetData = null, overrideImageUrl = null, options = {}) {
             // Cancel any pending debounced save so stale ticker/OCR cannot overwrite
             if (neonSaveTimeout) {
                 clearTimeout(neonSaveTimeout);
@@ -2015,6 +2177,7 @@
 
             // Sync master state directly
             state.loggedSeconds = currentTodaySec;
+            state.totalLoggedSeconds = currentTodaySec;
             state.remainingSeconds = remSec;
             state.timesheetData = timesheetDataToSave;
             state.detectedDays = detectedDays;
@@ -2070,49 +2233,72 @@
             saveSession();
 
             if (!pin) {
-                updateNeonBadge('ready', 'Enter PIN');
-                openPinModal();
+                if (!options.silent && !options.keepalive) {
+                    updateNeonBadge('ready', 'Enter PIN');
+                    openPinModal();
+                }
                 return;
             }
 
             // Offline Mutation Queue: if offline, queue update and return safely
             if (!navigator.onLine) {
                 queueOfflineMutation(pin, payload);
-                updateNeonBadge('offline', 'Saved Locally (Offline)');
+                if (!options.silent) {
+                    updateNeonBadge('offline', 'Saved Locally (Offline)');
+                }
                 return;
             }
 
             try {
                 state.isAiSyncing = true;
-                updateNeonBadge('syncing', 'Saving...');
+                if (!options.silent) {
+                    updateNeonBadge('syncing', 'Saving...');
+                }
 
-                const res = await fetch('/api/snip8-session', {
+                const fetchOpts = {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'x-user-pin': pin
                     },
                     body: JSON.stringify(payload)
-                });
+                };
+                if (options.keepalive) {
+                    fetchOpts.keepalive = true;
+                }
+
+                const res = await fetch('/api/snip8-session', fetchOpts);
 
                 if (res.status === 401) {
                     clearUserPin();
-                    updateNeonBadge('offline', 'PIN Required');
-                    openPinModal();
+                    if (!options.silent && !options.keepalive) {
+                        updateNeonBadge('offline', 'PIN Required');
+                        openPinModal();
+                    }
                     return;
                 }
 
                 if (res.ok) {
                     clearOfflineMutation();
-                    updateNeonBadge('synced', 'Neon Synced');
+                    if (!options.silent) {
+                        updateNeonBadge('synced', 'Neon Synced');
+                    }
                     updateSessionMeta('neon_saved');
                 } else {
                     throw new Error(`HTTP ${res.status}`);
                 }
             } catch (err) {
+                if (options.keepalive && navigator.sendBeacon) {
+                    try {
+                        const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+                        navigator.sendBeacon('/api/snip8-session', blob);
+                    } catch (bErr) { }
+                }
                 console.warn('snip8: Neon save error (queued offline):', err.message);
                 queueOfflineMutation(pin, payload);
-                updateNeonBadge('offline', 'Saved Locally');
+                if (!options.silent) {
+                    updateNeonBadge('offline', 'Saved Locally');
+                }
             } finally {
                 state.isAiSyncing = false;
             }

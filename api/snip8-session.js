@@ -40,7 +40,7 @@ export default async function handler(req, res) {
             return;
         }
 
-        const workDate = url.searchParams.get('work_date') || body.work_date || null;
+        const workDate = url.searchParams.get('work_date') || url.searchParams.get('date') || body.work_date || body.date || null;
         const todayStr = new Date().toISOString().split('T')[0];
 
         // GET: Fetch active session for user_pin on CURRENT_DATE (or workDate)
@@ -67,6 +67,7 @@ export default async function handler(req, res) {
                 user_pin: userPin,
                 work_date: session.work_date,
                 session,
+                row: session,
                 source: 'neon'
             }));
             return;
