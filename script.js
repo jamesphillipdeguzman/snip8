@@ -55,6 +55,43 @@
         const fileInput = document.getElementById('fileInput');
         const statusContainer = document.getElementById('statusContainer');
         const dashboard = document.getElementById('dashboard');
+
+        // Validation Progress Controller
+        function setValidationProgress(percent, message, state = 'running') {
+            const container = document.getElementById('validationProgressContainer');
+            const bar = document.getElementById('validationProgressBar');
+            const text = document.getElementById('validationStatusText');
+            const percentText = document.getElementById('validationPercentText');
+            const spinner = document.getElementById('validationSpinner');
+
+            if (!container || !bar) return;
+
+            container.style.display = 'block';
+            bar.style.width = `${percent}%`;
+            if (text) text.textContent = message;
+            if (percentText) percentText.textContent = `${Math.round(percent)}%`;
+
+            if (state === 'success') {
+                bar.style.background = '#10b981'; // Emerald Green
+                if (spinner) spinner.style.display = 'none';
+                setTimeout(() => {
+                    container.style.display = 'none';
+                    bar.style.width = '0%';
+                    bar.style.background = 'linear-gradient(90deg, #3b82f6, #6366f1)';
+                }, 2500);
+            } else if (state === 'error') {
+                bar.style.background = '#ef4444'; // Red
+                if (spinner) spinner.style.display = 'none';
+                setTimeout(() => {
+                    container.style.display = 'none';
+                    bar.style.width = '0%';
+                    bar.style.background = 'linear-gradient(90deg, #3b82f6, #6366f1)';
+                }, 4000);
+            } else {
+                if (spinner) spinner.style.display = 'inline-block';
+            }
+        }
+        window.setValidationProgress = setValidationProgress;
         const dispTotalTracked = document.getElementById('dispTotalTracked');
         const dispTodayLogged = document.getElementById('dispTodayLogged');
         const dispTodayLabel = document.getElementById('dispTodayLabel');
@@ -417,9 +454,12 @@
             ensureAudioRunning();
             requestNotificationPermission();
 
-            statusContainer.classList.remove('hidden');
-            statusContainer.classList.add('animate-pulse');
-            statusContainer.textContent = "Compressing image...";
+            setValidationProgress(15, 'Extracting timesheet text (OCR)...');
+            if (statusContainer) {
+                statusContainer.classList.remove('hidden');
+                statusContainer.classList.add('animate-pulse');
+                statusContainer.textContent = "Compressing image...";
+            }
 
             // 1. Immediately compress the image before any further processing
             const compressedBlob = await compressImageForMobile(file);
@@ -442,26 +482,34 @@
             // 2. Fast Mobile Path: Skip heavy local Tesseract OCR on mobile and route directly to Gemini AI
             const isMobile = /Mobi|Android/i.test(navigator.userAgent);
             if (isMobile) {
-                statusContainer.textContent = "✨ Analyzing with Gemini AI...";
+                setValidationProgress(50, 'Validating timesheet with Gemini Vision...');
+                if (statusContainer) statusContainer.textContent = "✨ Analyzing with Gemini AI...";
                 updateParseSourceBadge('parsing');
                 try {
                     const handled = await triggerAiValidationFallback(base64Image, 'Mobile direct Gemini AI route');
                     if (handled) return;
                 } catch (mobErr) {
                     console.error('snip8: Mobile AI validation failed:', mobErr);
-                    statusContainer.classList.remove('animate-pulse');
-                    statusContainer.textContent = `AI analysis failed (${mobErr.message || 'Network error'}). Using manual entry.`;
-                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 5000);
+                    setValidationProgress(100, 'Failed to validate timesheet', 'error');
+                    if (statusContainer) {
+                        statusContainer.classList.remove('animate-pulse');
+                        statusContainer.textContent = `AI analysis failed (${mobErr.message || 'Network error'}). Using manual entry.`;
+                        setTimeout(() => { statusContainer.classList.add('hidden'); }, 5000);
+                    }
                     return;
                 }
-                statusContainer.classList.remove('animate-pulse');
-                statusContainer.textContent = "AI scan returned incomplete data. Use manual entry below.";
-                setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+                setValidationProgress(100, 'Failed to validate timesheet', 'error');
+                if (statusContainer) {
+                    statusContainer.classList.remove('animate-pulse');
+                    statusContainer.textContent = "AI scan returned incomplete data. Use manual entry below.";
+                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+                }
                 return;
             }
 
             // 3. Desktop Path: Contrast enhancement and local OCR with strict 5-second timeout
-            statusContainer.textContent = "Enhancing contrast and running OCR on timesheet...";
+            setValidationProgress(25, 'Extracting timesheet text (OCR)...');
+            if (statusContainer) statusContainer.textContent = "Enhancing contrast and running OCR on timesheet...";
 
             const img = new Image();
             img.src = URL.createObjectURL(compressedBlob);
@@ -521,13 +569,16 @@
                 );
                 const result = await Promise.race([ocrPromise, timeoutPromise]);
 
-                statusContainer.classList.remove('animate-pulse');
-                statusContainer.classList.add('hidden');
+                if (statusContainer) {
+                    statusContainer.classList.remove('animate-pulse');
+                    statusContainer.classList.add('hidden');
+                }
                 rawOcrText.textContent = result.data.text || "(No readable text detected)";
                 await parseText(result.data.text, base64Image);
             } catch (err) {
                 console.warn('snip8: Tesseract OCR error/timeout, evaluating AI fallback:', err);
-                statusContainer.textContent = "✨ Analyzing with Gemini AI...";
+                setValidationProgress(50, 'Validating timesheet with Gemini Vision...');
+                if (statusContainer) statusContainer.textContent = "✨ Analyzing with Gemini AI...";
                 updateParseSourceBadge('parsing');
                 if (base64Image) {
                     const fallbackHandled = await triggerAiValidationFallback(
@@ -536,19 +587,25 @@
                     );
                     if (fallbackHandled) return;
                 }
-                statusContainer.classList.remove('animate-pulse');
-                statusContainer.classList.remove('hidden');
-                statusContainer.textContent = "OCR scan failed. Use manual entry below.";
-                setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+                setValidationProgress(100, 'Failed to validate timesheet', 'error');
+                if (statusContainer) {
+                    statusContainer.classList.remove('animate-pulse');
+                    statusContainer.classList.remove('hidden');
+                    statusContainer.textContent = "OCR scan failed. Use manual entry below.";
+                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+                }
             }
         }
 
         async function triggerAiValidationFallback(base64Image, reason) {
             if (!base64Image) return false;
             try {
-                statusContainer.classList.remove('hidden');
-                statusContainer.classList.add('animate-pulse');
-                statusContainer.innerHTML = `<span>🤖 <strong>Triggering AI Vision:</strong> ${escapeHtml(reason)}<br>Validating timesheet with Gemini Vision...</span>`;
+                setValidationProgress(50, 'Validating timesheet with Gemini Vision...');
+                if (statusContainer) {
+                    statusContainer.classList.remove('hidden');
+                    statusContainer.classList.add('animate-pulse');
+                    statusContainer.innerHTML = `<span>🤖 <strong>Triggering AI Vision:</strong> ${escapeHtml(reason)}<br>Validating timesheet with Gemini Vision...</span>`;
+                }
                 updateParseSourceBadge('parsing');
 
                 const result = await Snip8Validation.validateWithAi(base64Image, {
@@ -557,6 +614,7 @@
 
                 if (result && result.success) {
                     const aiResult = result;
+                    setValidationProgress(85, 'Applying timesheet values & syncing...');
 
                     // 1. Update the master state directly
                     state.loggedSeconds = aiResult.loggedSeconds || 28805;
@@ -607,14 +665,17 @@
 
                     // Explicitly call the Neon database save function immediately with these updated values
                     await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData);
+                    setValidationProgress(100, 'Timesheet successfully synced!', 'success');
 
                     const rawConf = aiResult.confidence || 'High';
                     const conf = rawConf.charAt(0).toUpperCase() + rawConf.slice(1).toLowerCase();
                     updateParseSourceBadge('ai', conf);
 
-                    statusContainer.classList.remove('animate-pulse');
-                    statusContainer.textContent = `✨ Done — Timesheet validated via Gemini Vision AI (${aiResult.confidence} confidence)`;
-                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
+                    if (statusContainer) {
+                        statusContainer.classList.remove('animate-pulse');
+                        statusContainer.textContent = `✨ Done — Timesheet validated via Gemini Vision AI (${aiResult.confidence} confidence)`;
+                        setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
+                    }
 
                     if (aiValidationNotice && aiValidationDetail && aiValidationModel) {
                         aiValidationDetail.textContent = `Confidence: ${(aiResult.confidence || 'high').toUpperCase()} (${formatHms(state.loggedSeconds)} logged)`;
@@ -630,10 +691,13 @@
                 }
             } catch (err) {
                 console.warn('snip8: AI Vision validation failed:', err);
-                statusContainer.classList.remove('animate-pulse');
-                statusContainer.classList.remove('hidden');
-                statusContainer.textContent = `AI analysis failed (${err.message || 'Network error'}). Using manual entry.`;
-                setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+                setValidationProgress(100, 'Failed to validate timesheet', 'error');
+                if (statusContainer) {
+                    statusContainer.classList.remove('animate-pulse');
+                    statusContainer.classList.remove('hidden');
+                    statusContainer.textContent = `AI analysis failed (${err.message || 'Network error'}). Using manual entry.`;
+                    setTimeout(() => { statusContainer.classList.add('hidden'); }, 4000);
+                }
             }
             return false;
         }
@@ -974,7 +1038,9 @@
             }
 
             // Immediate Neon save with verified header total
+            setValidationProgress(85, 'Applying timesheet values & syncing...');
             await saveSessionToNeon(finalLoggedSec, finalRemainingSec, parsedShifts);
+            setValidationProgress(100, 'Timesheet successfully synced!', 'success');
 
             // Local OCR completed successfully
             updateParseSourceBadge('ocr');
@@ -1444,16 +1510,20 @@
                         throw new Error('Could not convert uploaded screenshot to base64.');
                     }
 
+                    setValidationProgress(50, 'Validating timesheet with Gemini Vision...');
                     const handled = await triggerAiValidationFallback(b64, 'Manual override via "Re-parse with Gemini AI" button');
                     if (handled) {
                         // Explicitly call the Neon database save function immediately with master state values
                         await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData);
+                        setValidationProgress(100, 'Timesheet successfully synced!', 'success');
                     } else {
+                        setValidationProgress(100, 'Failed to validate timesheet', 'error');
                         alert('Gemini AI validation could not process the timesheet. Check your network connection or API key.');
                         updateParseSourceBadge('ocr');
                     }
                 } catch (err) {
                     console.error('snip8: forceAiBtn error', err);
+                    setValidationProgress(100, 'Failed to validate timesheet', 'error');
                     alert('Gemini AI re-scan failed: ' + (err.message || err));
                     updateParseSourceBadge('ocr');
                 } finally {
