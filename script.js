@@ -1002,12 +1002,20 @@
             // or if an AI sync is currently committing to the database
             if (state.isAiSyncing) return;
 
-            if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+            // Freeze on Cap Protection: explicitly disallow any timer tickers from recalculating downwards, and freeze remaining time at 00:00:00
+            if (state.loggedSeconds >= TARGET_DAILY_SEC || baseTodaySec >= TARGET_DAILY_SEC) {
                 const finalTodaySec = Math.max(baseTodaySec, state.loggedSeconds, TARGET_DAILY_SEC);
                 const finalTotalSec = Math.max(baseTotalTrackedSec, totalTrackedSec, finalTodaySec);
+                state.loggedSeconds = finalTodaySec;
+                state.remainingSeconds = 0;
                 dispTodayLogged.textContent = formatHms(finalTodaySec);
                 dispTotalTracked.textContent = formatHms(finalTotalSec);
                 dispRemaining.textContent = formatHms(0);
+                if (countdown) {
+                    countdown.textContent = "00:00:00";
+                    countdown.classList.remove('text-white');
+                    countdown.classList.add('text-emerald-400');
+                }
                 const today = detectedDays[selectedDayIndex] || { label: 'Active Day' };
                 dispTodayLabel.textContent = `${today.label} Active Column • 8h Cap Reached`;
                 return;
@@ -1175,6 +1183,7 @@
                     clearCountdownTimers();
                     timerCompleted = true;
                     completedElapsedSec = 0;
+                    state.remainingSeconds = 0;
                     dispRemaining.textContent = formatHms(0);
                     dispTodayLogged.textContent = formatHms(state.loggedSeconds || baseTodaySec);
                     dispTotalTracked.textContent = formatHms(state.loggedSeconds || totalTrackedSec);
@@ -1486,6 +1495,64 @@
             }, 1500);
         }
 
+        function getWorkDate() {
+            return new Date().toISOString().split('T')[0];
+        }
+
+        const STORAGE_KEY_OFFLINE_QUEUE = 'snip8_offline_queue';
+
+        function queueOfflineMutation(pin, payload) {
+            if (!pin || !payload) return;
+            try {
+                localStorage.setItem(STORAGE_KEY_OFFLINE_QUEUE, JSON.stringify({
+                    pin,
+                    payload,
+                    timestamp: Date.now()
+                }));
+            } catch (e) {
+                console.warn('snip8: could not write to offline queue:', e);
+            }
+        }
+
+        function clearOfflineMutation() {
+            try {
+                localStorage.removeItem(STORAGE_KEY_OFFLINE_QUEUE);
+            } catch (e) { }
+        }
+
+        async function flushOfflineQueue() {
+            try {
+                const queuedRaw = localStorage.getItem(STORAGE_KEY_OFFLINE_QUEUE);
+                if (!queuedRaw) return;
+                const queued = JSON.parse(queuedRaw);
+                if (!queued || !queued.payload || !queued.pin) {
+                    clearOfflineMutation();
+                    return;
+                }
+
+                updateNeonBadge('syncing', 'Syncing offline queue...');
+                const res = await fetch('/api/snip8-session', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-user-pin': queued.pin
+                    },
+                    body: JSON.stringify(queued.payload)
+                });
+
+                if (res.ok) {
+                    clearOfflineMutation();
+                    updateNeonBadge('synced', 'Neon Synced');
+                    updateSessionMeta('neon_saved');
+                } else if (res.status === 401) {
+                    clearUserPin();
+                    openPinModal();
+                }
+            } catch (err) {
+                console.warn('snip8: flushOfflineQueue error:', err);
+            }
+        }
+
         async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null, overrideTimesheetData = null) {
             // Cancel any pending debounced save so stale ticker/OCR cannot overwrite
             if (neonSaveTimeout) {
@@ -1508,8 +1575,8 @@
             } else {
                 if (detectedDays.length === 0 && !targetTimestamp) return;
 
-                // If daily cap has been reached or timer completed, do not increment further
-                if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+                // Freeze on Cap: If daily cap has been reached or timer completed, do not increment further or decrease logged_seconds
+                if (state.loggedSeconds >= TARGET_DAILY_SEC || baseTodaySec >= TARGET_DAILY_SEC) {
                     currentTodaySec = Math.max(baseTodaySec, state.loggedSeconds, TARGET_DAILY_SEC);
                     remSec = 0;
                 } else {
@@ -1524,30 +1591,51 @@
                 timesheetDataToSave = (state.timesheetData && state.timesheetData.length ? state.timesheetData : detectedDays);
             }
 
+            if (currentTodaySec >= TARGET_DAILY_SEC) {
+                remSec = 0;
+            }
+
             // Sync master state directly
             state.loggedSeconds = currentTodaySec;
             state.remainingSeconds = remSec;
             state.timesheetData = timesheetDataToSave;
 
             const pin = getUserPin();
+            const workDate = getWorkDate();
+
+            const payload = {
+                user_pin: pin,
+                work_date: workDate,
+                total_seconds_remaining: remSec,
+                daily_cap_seconds: TARGET_DAILY_SEC,
+                logged_seconds: currentTodaySec,
+                timesheet_data: timesheetDataToSave,
+                last_scanned_image_url: null,
+                updated_at: new Date().toISOString()
+            };
+
+            // Always persist immediately to local PWA cache & session keys (offline-first)
+            if (pin) {
+                localStorage.setItem(`snip8_cache_${pin}_${workDate}`, JSON.stringify(payload));
+            }
+            saveSession();
+
             if (!pin) {
                 updateNeonBadge('ready', 'Enter PIN');
                 openPinModal();
                 return;
             }
 
+            // Offline Mutation Queue: if offline, queue update and return safely
+            if (!navigator.onLine) {
+                queueOfflineMutation(pin, payload);
+                updateNeonBadge('offline', 'Saved Locally (Offline)');
+                return;
+            }
+
             try {
                 state.isAiSyncing = true;
                 updateNeonBadge('syncing', 'Saving...');
-
-                const payload = {
-                    user_pin: pin,
-                    total_seconds_remaining: remSec,
-                    daily_cap_seconds: TARGET_DAILY_SEC,
-                    logged_seconds: currentTodaySec,
-                    timesheet_data: timesheetDataToSave,
-                    last_scanned_image_url: null
-                };
 
                 const res = await fetch('/api/snip8-session', {
                     method: 'POST',
@@ -1566,13 +1654,15 @@
                 }
 
                 if (res.ok) {
+                    clearOfflineMutation();
                     updateNeonBadge('synced', 'Neon Synced');
                     updateSessionMeta('neon_saved');
                 } else {
                     throw new Error(`HTTP ${res.status}`);
                 }
             } catch (err) {
-                console.warn('snip8: Neon save error:', err.message);
+                console.warn('snip8: Neon save error (queued offline):', err.message);
+                queueOfflineMutation(pin, payload);
                 updateNeonBadge('offline', 'Saved Locally');
             } finally {
                 state.isAiSyncing = false;
@@ -1581,21 +1671,107 @@
         window.saveSessionToNeon = saveSessionToNeon;
         const saveToNeon = saveSessionToNeon;
 
-        async function fetchNeonSession() {
-            const pin = getUserPin();
-            if (!pin) {
-                updateNeonBadge('ready', 'Enter PIN');
+        // Immediate Local Hydration helper
+        function loadCachedSession(userPin = getUserPin(), workDate = getWorkDate()) {
+            if (!userPin) return false;
+            try {
+                const cachedRaw = localStorage.getItem(`snip8_cache_${userPin}_${workDate}`);
+                if (!cachedRaw) return false;
+                const row = JSON.parse(cachedRaw);
+                if (!row || typeof row !== 'object') return false;
+
+                const logged = Number(row.logged_seconds) || 0;
+                const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
+                const rem = row.total_seconds_remaining !== undefined
+                    ? Number(row.total_seconds_remaining)
+                    : Math.max(0, dailyCap - logged);
+
+                state.loggedSeconds = logged;
+                state.remainingSeconds = rem;
+
+                let days = row.timesheet_data;
+                if (typeof days === 'string') {
+                    try { days = JSON.parse(days); } catch (e) { days = []; }
+                }
+                state.timesheetData = Array.isArray(days) ? days : [];
+
+                if (state.timesheetData.length > 0) {
+                    detectedDays = state.timesheetData.map((d, i) => {
+                        const h = Number(d && d.h) || 0;
+                        const m = Number(d && d.m) || 0;
+                        const s = Number(d && d.s) || 0;
+                        return {
+                            label: String((d && d.label) || `Day ${i + 1}`),
+                            dayName: String((d && d.dayName) || ''),
+                            h, m, s,
+                            sec: (d.sec !== undefined && d.sec !== null) ? Number(d.sec) : (h * 3600 + m * 60 + s),
+                            shifts: d.shifts || []
+                        };
+                    });
+                } else if (logged > 0) {
+                    const now = new Date();
+                    const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                    detectedDays = [{
+                        label: todayLabel,
+                        dayName: todayLabel.split(' ')[0],
+                        h: Math.floor(logged / 3600),
+                        m: Math.floor((logged % 3600) / 60),
+                        s: logged % 60,
+                        sec: logged,
+                        shifts: []
+                    }];
+                }
+
+                selectedDayIndex = 0;
+                baseTodaySec = logged;
+                baseTotalTrackedSec = Math.max(totalTrackedSec, logged);
+                totalTrackedSec = baseTotalTrackedSec;
+
+                const updatedAt = new Date(row.updated_at || Date.now());
+                const target = new Date(Date.now() + rem * 1000);
+
+                if (logged >= TARGET_DAILY_SEC) {
+                    timerCompleted = true;
+                    completedElapsedSec = 0;
+                    clearCountdownTimers();
+                }
+
+                renderAll({
+                    restore: {
+                        startTime: updatedAt.getTime(),
+                        target,
+                        alarmDismissed: rem <= 0
+                    }
+                });
+
+                updateLoggedDisplays();
+                updateNeonBadge('offline', 'Local Cache');
+                rawOcrText.textContent = `(Session restored from local offline cache • PIN ${maskPin(userPin)} • ${formatHms(logged)} logged.)`;
+                return true;
+            } catch (e) {
+                console.warn('snip8: error loading cached session:', e);
+                return false;
+            }
+        }
+
+        // Background Neon Revalidation with Monotonic Guard
+        async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkDate()) {
+            if (!userPin) return false;
+            if (!navigator.onLine) {
+                updateNeonBadge('offline', 'Offline Mode');
                 return false;
             }
 
             try {
+                updateNeonBadge('syncing', 'Checking cloud...');
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 4000);
+                const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-                const res = await fetch('/api/snip8-session', {
+                const url = `/api/snip8-session?user_pin=${encodeURIComponent(userPin)}&work_date=${encodeURIComponent(workDate)}`;
+                const res = await fetch(url, {
                     signal: controller.signal,
                     headers: {
-                        'x-user-pin': pin
+                        'x-user-pin': userPin
                     }
                 });
                 clearTimeout(timeoutId);
@@ -1607,73 +1783,113 @@
                     return false;
                 }
 
-                if (!res.ok) return false;
+                if (!res.ok) {
+                    updateNeonBadge('offline', 'Offline Mode');
+                    return false;
+                }
+
                 const data = await res.json();
-                if (!data.success || !data.session) return false;
-
-                const session = data.session;
-                let days = session.timesheet_data;
-                if (typeof days === 'string') {
-                    try { days = JSON.parse(days); } catch (e) { days = []; }
-                }
-
-                // If this is a fresh daily session without scanned days yet
-                if (!Array.isArray(days) || days.length === 0) {
-                    updateNeonBadge('synced', 'Neon Ready (Today)');
+                if (!data.success || !data.session) {
+                    updateNeonBadge('ready', 'Neon Ready');
                     return false;
                 }
 
-                const cleanDays = days.map((d, i) => {
-                    const h = Number(d && d.h) || 0;
-                    const m = Number(d && d.m) || 0;
-                    const s = Number(d && d.s) || 0;
-                    return {
-                        label: String((d && d.label) || `Day ${i + 1}`),
-                        dayName: String((d && d.dayName) || ''),
-                        h, m, s,
-                        sec: h * 3600 + m * 60 + s,
-                        shifts: d.shifts || []
-                    };
-                });
+                const row = data.session;
+                const localLogged = state.loggedSeconds || 0;
+                const dbLogged = Number(row.logged_seconds) || 0;
 
-                const updatedAt = new Date(session.updated_at || Date.now());
-                const now = new Date();
-                const dailyCap = Number(session.daily_cap_seconds) || TARGET_DAILY_SEC;
-                const logged = Number(session.logged_seconds) || 0;
-                const remainingSec = session.total_seconds_remaining !== undefined
-                    ? Number(session.total_seconds_remaining)
-                    : Math.max(0, dailyCap - logged);
+                // Monotonic Guard: Only accept DB state if it is higher than local,
+                // or if DB has completed (>= 28800), or if local is completely uninitialized (0).
+                if (dbLogged >= 28800 || dbLogged > localLogged || localLogged === 0) {
+                    state.loggedSeconds = dbLogged;
+                    state.remainingSeconds = row.total_seconds_remaining !== undefined
+                        ? Number(row.total_seconds_remaining)
+                        : Math.max(0, TARGET_DAILY_SEC - dbLogged);
 
-                // Check calendar window
-                if (!isWithinTodayWindow(updatedAt, now)) {
-                    return false;
-                }
-
-                detectedDays = cleanDays;
-                selectedDayIndex = 0;
-                totalTrackedSec = logged > 0 ? logged : cleanDays.reduce((acc, d) => acc + d.sec, 0);
-
-                const target = new Date(Date.now() + remainingSec * 1000);
-
-                renderAll({
-                    restore: {
-                        startTime: updatedAt.getTime(),
-                        target,
-                        alarmDismissed: remainingSec <= 0
+                    let days = row.timesheet_data;
+                    if (typeof days === 'string') {
+                        try { days = JSON.parse(days); } catch (e) { days = []; }
                     }
-                });
+                    state.timesheetData = Array.isArray(days) ? days : [];
 
-                // Update local storage cache
-                saveSession();
+                    if (state.timesheetData.length > 0) {
+                        detectedDays = state.timesheetData.map((d, i) => {
+                            const h = Number(d && d.h) || 0;
+                            const m = Number(d && d.m) || 0;
+                            const s = Number(d && d.s) || 0;
+                            return {
+                                label: String((d && d.label) || `Day ${i + 1}`),
+                                dayName: String((d && d.dayName) || ''),
+                                h, m, s,
+                                sec: (d.sec !== undefined && d.sec !== null) ? Number(d.sec) : (h * 3600 + m * 60 + s),
+                                shifts: d.shifts || []
+                            };
+                        });
+                        selectedDayIndex = 0;
+                        baseTodaySec = dbLogged;
+                        baseTotalTrackedSec = Math.max(totalTrackedSec, dbLogged);
+                        totalTrackedSec = baseTotalTrackedSec;
+                    } else if (dbLogged > 0) {
+                        const now = new Date();
+                        const todayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                        detectedDays = [{
+                            label: todayLabel,
+                            dayName: todayLabel.split(' ')[0],
+                            h: Math.floor(dbLogged / 3600),
+                            m: Math.floor((dbLogged % 3600) / 60),
+                            s: dbLogged % 60,
+                            sec: dbLogged,
+                            shifts: []
+                        }];
+                        selectedDayIndex = 0;
+                        baseTodaySec = dbLogged;
+                        baseTotalTrackedSec = Math.max(totalTrackedSec, dbLogged);
+                        totalTrackedSec = baseTotalTrackedSec;
+                    }
 
-                updateSessionMeta('neon');
-                updateNeonBadge('synced', 'Neon Synced');
-                rawOcrText.textContent = `(Session restored from Neon PostgreSQL for today • PIN ${maskPin(pin)} • last updated ${formatClock(updatedAt)}.)`;
-                return true;
+                    if (dbLogged >= TARGET_DAILY_SEC) {
+                        timerCompleted = true;
+                        completedElapsedSec = 0;
+                        clearCountdownTimers();
+                    }
+
+                    // Update local cache to match the verified remote state
+                    localStorage.setItem(`snip8_cache_${userPin}_${workDate}`, JSON.stringify(row));
+                    saveSession();
+
+                    const updatedAt = new Date(row.updated_at || Date.now());
+                    const target = new Date(Date.now() + state.remainingSeconds * 1000);
+                    renderAll({
+                        restore: {
+                            startTime: updatedAt.getTime(),
+                            target,
+                            alarmDismissed: state.remainingSeconds <= 0
+                        }
+                    });
+
+                    updateLoggedDisplays();
+                    updateSessionMeta('neon');
+                    updateNeonBadge('synced', 'Neon Synced');
+                    rawOcrText.textContent = `(Session restored from Neon PostgreSQL for today • PIN ${maskPin(userPin)} • last updated ${formatClock(updatedAt)}.)`;
+                    return true;
+                } else if (localLogged > dbLogged) {
+                    // Local device progressed while offline; sync new progress up to Neon
+                    updateNeonBadge('syncing', 'Syncing local progress...');
+                    debouncedSaveSession();
+                    return true;
+                } else {
+                    updateNeonBadge('synced', 'Neon Synced');
+                    return true;
+                }
             } catch (err) {
-                console.warn('snip8: could not fetch session from Neon:', err);
+                console.warn('snip8: could not revalidate session from Neon (offline/error):', err.message);
+                updateNeonBadge('offline', 'Offline Mode');
                 return false;
             }
+        }
+
+        async function fetchNeonSession() {
+            return await revalidateNeonSession(getUserPin(), getWorkDate());
         }
 
         // ===== Session Persistence (localStorage) =====
@@ -1694,6 +1910,22 @@
                 // lastUpdated doubles as the live-increment baseline (when the screenshot/entry was processed)
                 writeJSON(SESSION_KEYS.lastUpdated, new Date(timerStartTime || Date.now()).toISOString());
                 writeJSON(SESSION_KEYS.totalTrackedSec, totalTrackedSec);
+
+                const pin = getUserPin();
+                const workDate = getWorkDate();
+                if (pin) {
+                    const cachePayload = {
+                        user_pin: pin,
+                        work_date: workDate,
+                        total_seconds_remaining: state.remainingSeconds,
+                        daily_cap_seconds: TARGET_DAILY_SEC,
+                        logged_seconds: state.loggedSeconds,
+                        timesheet_data: state.timesheetData && state.timesheetData.length ? state.timesheetData : detectedDays,
+                        last_scanned_image_url: null,
+                        updated_at: new Date().toISOString()
+                    };
+                    localStorage.setItem(`snip8_cache_${pin}_${workDate}`, JSON.stringify(cachePayload));
+                }
                 return true;
             } catch (e) {
                 console.warn('snip8: could not save session', e);
@@ -1815,10 +2047,12 @@
 
         // replaceState (not pushState) so adjustments don't flood the back-button history
         function updateSyncUrl() {
-            const url = buildSyncUrl();
-            if (!url) return;
-            try { history.replaceState(null, '', url); } catch (e) { /* e.g. sandboxed iframe */ }
-            if (syncModal && syncModal.open) renderSyncModal();
+            if (syncModal && syncModal.open) {
+                const url = buildSyncUrl();
+                if (!url) return;
+                try { history.replaceState(null, '', url); } catch (e) { /* e.g. sandboxed iframe */ }
+                renderSyncModal();
+            }
         }
 
         function clearSyncUrl() {
@@ -1935,6 +2169,7 @@
             if (!syncModal || !syncModal.open) return;
             if (typeof syncModal.close === 'function') syncModal.close();
             else syncModal.removeAttribute('open');
+            clearSyncUrl();
         }
 
         let copyFeedbackTimeout = null;
@@ -1986,13 +2221,17 @@
                 updatePinUI();
                 closePinModal();
 
-                updateNeonBadge('syncing', 'Connecting...');
-                const restored = await fetchNeonSession();
-                if (!restored) {
-                    const restoredLocal = hydrateSession();
-                    if (!restoredLocal) {
-                        updateNeonBadge('ready', 'Neon Ready');
-                    }
+                const workDate = getWorkDate();
+                const cachedLoaded = loadCachedSession(enteredPin, workDate);
+                if (!cachedLoaded) {
+                    hydrateSession();
+                }
+
+                if (navigator.onLine) {
+                    await flushOfflineQueue();
+                    await revalidateNeonSession(enteredPin, workDate);
+                } else {
+                    updateNeonBadge('offline', 'Offline Mode');
                 }
             });
         }
@@ -2008,20 +2247,35 @@
             pinModal.addEventListener('click', (e) => { if (e.target === pinModal) closePinModal(); });
         }
 
-        // Initialize user preferences, theme, then restore from Neon DB with localStorage fallback
-        async function init() {
+        // Offline Mutation Queue: Automatic flush when network connectivity resumes
+        window.addEventListener('online', async () => {
+            updateNeonBadge('syncing', 'Back online...');
+            await flushOfflineQueue();
+            const userPin = getUserPin();
+            const workDate = getWorkDate();
+            if (userPin) {
+                await revalidateNeonSession(userPin, workDate);
+            }
+        });
+
+        window.addEventListener('offline', () => {
+            updateNeonBadge('offline', 'Offline Mode');
+        });
+
+        // Initialize offline-first PWA storage with monotonic state reconciliation
+        async function initApp() {
+            // 1. Immediately purge address bar parameters to protect against stale cache / URL parameter overwrites
+            try {
+                window.history.replaceState({}, '', window.location.pathname);
+            } catch (e) { }
+
             Snip8Theme.init();
             initLiveIncrementToggle();
             updatePinUI();
 
-            // 1. If explicit sync link was opened, hydrate from it
-            if (hydrateFromSyncLink()) {
-                debouncedSaveSession();
-                return;
-            }
-
             // 2. Check for PIN
             const userPin = getUserPin();
+            const workDate = getWorkDate();
             if (!userPin) {
                 openPinModal();
                 updateNeonBadge('ready', 'Enter PIN');
@@ -2029,23 +2283,33 @@
                 return;
             }
 
-            // 3. Query Neon backend for latest saved session for this PIN
-            updateNeonBadge('syncing', 'Connecting...');
-            const restoredFromNeon = await fetchNeonSession();
-
-            // 4. Fallback to localStorage if Neon was unreachable or empty
-            if (!restoredFromNeon) {
-                const restoredFromLocal = hydrateSession();
-                if (restoredFromLocal) {
-                    updateNeonBadge('offline', 'Local Session');
-                } else {
+            // 3. Immediate Local Hydration (Stale-While-Revalidate):
+            // Load active user session from localStorage snip8_cache_${userPin}_${workDate}
+            const cachedLoaded = loadCachedSession(userPin, workDate);
+            if (!cachedLoaded) {
+                const localLoaded = hydrateSession();
+                if (!localLoaded) {
                     updateNeonBadge('ready', 'Neon Ready');
                 }
             }
+
+            // 4. Background Neon Revalidation (non-blocking)
+            if (navigator.onLine) {
+                (async () => {
+                    await flushOfflineQueue();
+                    await revalidateNeonSession(userPin, workDate);
+                })().catch(e => {
+                    console.warn('snip8: background revalidation error:', e);
+                });
+            } else {
+                updateNeonBadge('offline', 'Offline Mode');
+            }
         }
+        window.initApp = initApp;
+        const init = initApp;
 
         if (document.readyState === 'loading') {
-            window.addEventListener('DOMContentLoaded', init);
+            window.addEventListener('DOMContentLoaded', initApp);
         } else {
-            init();
+            initApp();
         }
