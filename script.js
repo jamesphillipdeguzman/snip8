@@ -1391,6 +1391,7 @@
             window.lastUploadedTimesheet = null;
             window.lastUploadedTimesheetBase64 = null;
             state.lastScannedImageUrl = null;
+            renderLatestScannedImage(null);
             clearSyncUrl();
             closeSyncModal();
         });
@@ -1558,6 +1559,48 @@
             }
         }
 
+        function renderLatestScannedImage(imageUrl, timestamp = null) {
+            const section = document.getElementById('scannedImageSection');
+            const imgEl = document.getElementById('scannedImageElement');
+            const linkEl = document.getElementById('openFullImageLink');
+            const scanTimeEl = document.getElementById('imageScanTime');
+
+            if (!imageUrl) {
+                if (section) section.style.display = 'none';
+                if (imgEl) imgEl.src = '';
+                return;
+            }
+
+            if (section && imgEl) {
+                // Append timestamp query parameter to bust browser cache on replaced single-asset uploads
+                const bustUrl = imageUrl.includes('?') ? `${imageUrl}&t=${Date.now()}` : `${imageUrl}?t=${Date.now()}`;
+                imgEl.src = bustUrl;
+                if (linkEl) linkEl.href = imageUrl;
+                if (scanTimeEl) {
+                    const d = timestamp ? new Date(timestamp) : new Date();
+                    scanTimeEl.textContent = `• Scanned ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+                }
+                section.style.display = 'block';
+            }
+        }
+        window.renderLatestScannedImage = renderLatestScannedImage;
+
+        function initImagePreviewCard() {
+            const toggleBtn = document.getElementById('toggleImagePreviewBtn');
+            const previewContainer = document.getElementById('imagePreviewContainer');
+            const chevron = document.getElementById('previewChevron');
+
+            if (toggleBtn && previewContainer) {
+                toggleBtn.addEventListener('click', (e) => {
+                    if (e.target.id === 'openFullImageLink') return;
+                    const isHidden = previewContainer.style.display === 'none';
+                    previewContainer.style.display = isHidden ? 'block' : 'none';
+                    if (chevron) chevron.style.transform = isHidden ? 'rotate(0deg)' : 'rotate(-90deg)';
+                });
+            }
+        }
+        window.initImagePreviewCard = initImagePreviewCard;
+
         async function uploadScreenshotToCloudinary(base64Data, userPin) {
             if (!base64Data || !userPin) return null;
 
@@ -1579,6 +1622,8 @@
                     try {
                         localStorage.setItem(`snip8_last_img_${userPin}`, data.secure_url);
                     } catch (e) { }
+
+                    renderLatestScannedImage(data.secure_url);
 
                     // Update Neon immediately with the new image URL
                     await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData, data.secure_url);
@@ -1735,10 +1780,14 @@
                 state.remainingSeconds = rem;
                 if (row.last_scanned_image_url) {
                     state.lastScannedImageUrl = row.last_scanned_image_url;
+                    renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
                 } else {
                     try {
                         const localImg = localStorage.getItem(`snip8_last_img_${userPin}`);
-                        if (localImg) state.lastScannedImageUrl = localImg;
+                        if (localImg) {
+                            state.lastScannedImageUrl = localImg;
+                            renderLatestScannedImage(localImg);
+                        }
                     } catch (e) { }
                 }
 
@@ -1860,6 +1909,7 @@
                         : Math.max(0, TARGET_DAILY_SEC - dbLogged);
                     if (row.last_scanned_image_url) {
                         state.lastScannedImageUrl = row.last_scanned_image_url;
+                        renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
                     }
 
                     let days = row.timesheet_data;
@@ -1928,14 +1978,20 @@
                     updateNeonBadge('synced', 'Neon Synced');
                     rawOcrText.textContent = `(Session restored from Neon PostgreSQL for today • PIN ${maskPin(userPin)} • last updated ${formatClock(updatedAt)}.)`;
                     return true;
-                } else if (localLogged > dbLogged) {
-                    // Local device progressed while offline; sync new progress up to Neon
-                    updateNeonBadge('syncing', 'Syncing local progress...');
-                    debouncedSaveSession();
-                    return true;
                 } else {
-                    updateNeonBadge('synced', 'Neon Synced');
-                    return true;
+                    if (row.last_scanned_image_url) {
+                        state.lastScannedImageUrl = row.last_scanned_image_url;
+                        renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
+                    }
+                    if (localLogged > dbLogged) {
+                        // Local device progressed while offline; sync new progress up to Neon
+                        updateNeonBadge('syncing', 'Syncing local progress...');
+                        debouncedSaveSession();
+                        return true;
+                    } else {
+                        updateNeonBadge('synced', 'Neon Synced');
+                        return true;
+                    }
                 }
             } catch (err) {
                 console.warn('snip8: could not revalidate session from Neon (offline/error):', err.message);
@@ -2254,7 +2310,9 @@
             }, 1800);
         }
 
-        syncMobileBtn.addEventListener('click', openSyncModal);
+        if (syncMobileBtn) {
+            syncMobileBtn.addEventListener('click', openSyncModal);
+        }
         syncModalClose.addEventListener('click', closeSyncModal);
         copySyncLinkBtn.addEventListener('click', copySyncLink);
         syncLinkInput.addEventListener('focus', () => syncLinkInput.select());
@@ -2330,6 +2388,7 @@
 
             Snip8Theme.init();
             initLiveIncrementToggle();
+            initImagePreviewCard();
             updatePinUI();
 
             // 2. Check for PIN

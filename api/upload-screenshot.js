@@ -52,11 +52,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Fixed public_id per PIN ensures strict 1-image storage with no file accumulation
-    const publicId = `snip8/snip8_user_${user_pin}_latest`;
-
     const uploadResponse = await cloudinary.uploader.upload(imageBase64, {
-      public_id: publicId,
+      public_id: `snip8_user_${user_pin}_latest`,
+      folder: 'snip8',
+      asset_folder: 'snip8',
       overwrite: true,
       invalidate: true,
       resource_type: 'image',

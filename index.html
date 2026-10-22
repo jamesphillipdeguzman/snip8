@@ -173,6 +173,25 @@
             <input type="file" id="fileInput" accept="image/*" class="hidden">
         </section>
 
+        <!-- Latest Scanned Timesheet Preview Section -->
+        <section id="scannedImageSection" class="scanned-image-card" style="display: none; margin: 1rem 0; border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; background: var(--card-bg, #ffffff); overflow: hidden;">
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-color, #e2e8f0); cursor: pointer;" id="toggleImagePreviewBtn">
+            <div style="display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 0.9rem;">
+              <span>📷</span>
+              <span>Latest Scanned Timesheet</span>
+              <span id="imageScanTime" style="font-size: 0.75rem; color: #64748b; font-weight: normal;"></span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <a id="openFullImageLink" href="#" target="_blank" rel="noopener noreferrer" style="font-size: 0.8rem; color: #2563eb; text-decoration: none;">Open Full ↗</a>
+              <span id="previewChevron" style="font-size: 0.8rem; color: #64748b; transition: transform 0.2s;">▼</span>
+            </div>
+          </div>
+          
+          <div id="imagePreviewContainer" style="padding: 1rem; text-align: center; display: block; max-height: 480px; overflow-y: auto;">
+            <img id="scannedImageElement" src="" alt="Latest Scanned Timesheet" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); cursor: zoom-in;" />
+          </div>
+        </section>
+
         <!-- Scan Progress Bar -->
         <div id="statusContainer"
             class="hidden text-center text-xs font-mono text-emerald-400 p-2 bg-emerald-950/40 border border-emerald-500/20 rounded-xl animate-pulse">
@@ -257,10 +276,6 @@
                     <button id="resetBtn"
                         class="ml-2 px-4 py-1.5 bg-slate-800 hover:bg-rose-950 hover:text-rose-300 border border-slate-700 rounded-lg text-xs font-mono text-slate-200 transition">
                         ⏹ Reset Timer
-                    </button>
-                    <button id="syncMobileBtn" type="button" aria-haspopup="dialog" aria-controls="syncModal"
-                        class="px-4 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/70 active:scale-95 border border-emerald-500/40 rounded-lg text-xs font-mono text-emerald-300 transition">
-                        📱 Sync to Mobile
                     </button>
                 </div>
 
@@ -379,7 +394,8 @@
         <details class="text-xs text-slate-500 border-t border-slate-800/60 pt-2" open>
             <div class="flex items-center justify-between gap-2">
                 <summary class="cursor-pointer hover:text-slate-400 select-none font-semibold text-slate-400">OCR Diagnostics / Raw Output</summary>
-                <button id="forceAiBtn" type="button" class="px-3 py-1.5 text-xs font-semibold rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex items-center gap-1.5 shadow-sm">
+                <button id="forceAiBtn" type="button"
+                    class="bg-emerald-600 hover:bg-emerald-700 text-white dark:bg-emerald-700 dark:hover:bg-emerald-600 font-medium text-xs px-4 py-2 rounded-lg shadow-sm border border-emerald-600 dark:border-emerald-500/30 transition-all focus:outline-none focus:ring-2 focus:ring-emerald-500/40 flex items-center gap-1.5">
                     ✨ Re-parse with Gemini AI
                 </button>
             </div>
