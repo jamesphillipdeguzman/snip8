@@ -21,6 +21,7 @@
         let detectedDays = [];
         let selectedDayIndex = 0;
         let totalTrackedSec = 0;
+        let clockifyAutoStopped = false;
 
         // Master application state for sync & AI validation
         const state = {
@@ -35,6 +36,7 @@
             detectedDays: [],
             isAiSyncing: false,
             isTabActive: true,
+            isLiveIncrement: true,
             tickerInterval: null,
             lastScannedImageUrl: null,
             get totalLoggedSeconds() {
@@ -1528,6 +1530,10 @@
                     dispTodayLogged.textContent = formatHms(state.loggedSeconds || baseTodaySec);
                     dispTotalTracked.textContent = formatHms(state.loggedSeconds || totalTrackedSec);
                     if (!alarmDismissed) triggerAlarm();
+                    if (!clockifyAutoStopped) {
+                        clockifyAutoStopped = true;
+                        stopClockifyTimer();
+                    }
                 }
                 return;
             }
@@ -1548,6 +1554,10 @@
                 updateLoggedDisplays();
                 debouncedSaveSession();
                 if (!alarmDismissed) triggerAlarm();
+                if (!clockifyAutoStopped) {
+                    clockifyAutoStopped = true;
+                    stopClockifyTimer();
+                }
                 return;
             }
 
@@ -1826,6 +1836,43 @@
         alarmBanner.addEventListener('click', stopAlarm);
         window.addEventListener('keydown', (e) => { if (e.key === 'Escape') stopAlarm(); });
 
+        // Helper to stop Clockify running timer
+        async function stopClockifyTimer() {
+            const btn = document.getElementById('btnStopClockify');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Stopping...';
+            }
+
+            try {
+                const res = await fetch('/api/stop-clockify', { method: 'POST' });
+                const data = await res.json();
+
+                if (res.ok && data.success) {
+                    setValidationProgress(100, 'Clockify timer stopped successfully!', 'success');
+                    if (btn) btn.textContent = 'Stopped ⏹️';
+                    // Toggle off live increment since timer is stopped
+                    const liveToggle = document.getElementById('liveIncrementToggle');
+                    if (liveToggle) liveToggle.checked = false;
+                    state.isLiveIncrement = false;
+                } else {
+                    throw new Error(data.error || 'Failed to stop Clockify timer');
+                }
+            } catch (err) {
+                console.error('Clockify stop failed:', err);
+                setValidationProgress(100, `Clockify Error: ${err.message}`, 'error');
+                if (btn) btn.textContent = '⏹️ Stop Clockify';
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+        window.stopClockifyTimer = stopClockifyTimer;
+
+        const btnStopClockify = document.getElementById('btnStopClockify');
+        if (btnStopClockify) {
+            btnStopClockify.addEventListener('click', stopClockifyTimer);
+        }
+
         document.getElementById('resetBtn').addEventListener('click', () => {
             silenceAlarm();
             clearCountdownTimers();
@@ -1837,6 +1884,12 @@
             countdown.classList.add('text-white');
             updateLoggedDisplays();
             debouncedSaveSession();
+            clockifyAutoStopped = false;
+            const btnClockify = document.getElementById('btnStopClockify');
+            if (btnClockify) {
+                btnClockify.textContent = '⏹️ Stop Clockify';
+                btnClockify.disabled = false;
+            }
         });
 
         document.getElementById('clearSessionBtn').addEventListener('click', () => {
@@ -1881,6 +1934,12 @@
             renderLatestScannedImage(null);
             clearSyncUrl();
             closeSyncModal();
+            clockifyAutoStopped = false;
+            const btnClockify = document.getElementById('btnStopClockify');
+            if (btnClockify) {
+                btnClockify.textContent = '⏹️ Stop Clockify';
+                btnClockify.disabled = false;
+            }
         });
 
         document.getElementById('manBtn').addEventListener('click', () => {
