@@ -1400,6 +1400,7 @@ function updateLoggedDisplays() {
     dispTodayLabel.textContent = `${today.label} Active Column${isRunningLive ? ' • Live' : ''}`;
 
     updateProgressBar(currentTodaySec);
+    updateLiveIncrementUI();
 }
 
 function updateProgressBar(loggedSeconds) {
@@ -1457,6 +1458,47 @@ function updateProgressBar(loggedSeconds) {
 }
 window.updateProgressBar = updateProgressBar;
 
+// ===== Contextual "Next Action" Dynamic Banner =====
+function renderNextAction(context) {
+    const banner = document.getElementById('nextActionBanner');
+    const content = document.getElementById('nextActionContent');
+    if (!banner || !content) return;
+
+    banner.classList.remove('hidden');
+
+    if (context === 'welcome' || (!state.loggedSeconds && !state.remainingSeconds)) {
+        // 1. Initial State / Empty Session
+        banner.className = 'w-full px-4 py-3 rounded-xl text-xs md:text-sm font-medium border bg-blue-50 dark:bg-blue-950/40 text-blue-800 dark:text-blue-300 border-blue-200 dark:border-blue-900/60 flex items-center justify-between shadow-sm';
+        content.innerHTML = `<span>🚀 <strong>Next Step:</strong> Start your timer in Springboard, click the <strong>Sync Bridge</strong> bookmark, then press <code class="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/60 font-mono text-[11px]">Win + Shift + S</code> to paste your timesheet.</span>`;
+    } else if (context === 'stopped' || state.isStoppedRemotely || !state.isLiveIncrement) {
+        // 2. Stopped / Paused State
+        banner.className = 'w-full px-4 py-3 rounded-xl text-xs md:text-sm font-medium border bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-900/60 flex items-center justify-between shadow-sm';
+        content.innerHTML = `<span>⏸️ <strong>Session Paused:</strong> When resuming work, start Springboard on desktop and paste a fresh screenshot to calibrate remaining time.</span>`;
+    } else if (context === 'running') {
+        // 3. Actively Running
+        banner.className = 'w-full px-4 py-3 rounded-xl text-xs md:text-sm font-medium border bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/60 flex items-center justify-between shadow-sm';
+        content.innerHTML = `<span>🟢 <strong>Tracking Active:</strong> Sync Bridge is connected. Tap <strong>Stop Springboard</strong> when stepping away or when hitting 8h 00m.</span>`;
+    }
+}
+window.renderNextAction = renderNextAction;
+
+document.getElementById('dismissActionBanner')?.addEventListener('click', () => {
+    document.getElementById('nextActionBanner')?.classList.add('hidden');
+});
+
+function updateLiveIncrementUI() {
+    const label = document.getElementById('liveIncrementLabel');
+    const isLive = Boolean(state.isLiveIncrement);
+    if (label) {
+        if (isLive) {
+            label.className = 'text-xs font-bold text-emerald-700 dark:text-emerald-400 select-none';
+        } else {
+            label.className = 'text-xs font-semibold text-slate-700 dark:text-slate-300 select-none';
+        }
+    }
+}
+window.updateLiveIncrementUI = updateLiveIncrementUI;
+
 function initLiveIncrementToggle() {
     if (!liveIncrementToggle) return;
     const saved = localStorage.getItem(STORAGE_KEY_LIVE_INCREMENT);
@@ -1465,12 +1507,15 @@ function initLiveIncrementToggle() {
     } else {
         liveIncrementToggle.checked = true;
     }
+    state.isLiveIncrement = liveIncrementToggle.checked;
+    updateLiveIncrementUI();
 
-        liveIncrementToggle.addEventListener('change', () => {
-            const isChecked = liveIncrementToggle.checked;
-            state.isLiveIncrement = isChecked;
-            localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, isChecked);
-            if (isChecked) {
+    liveIncrementToggle.addEventListener('change', () => {
+        const isChecked = liveIncrementToggle.checked;
+        state.isLiveIncrement = isChecked;
+        updateLiveIncrementUI();
+        localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, isChecked);
+        if (isChecked) {
                 const hint = document.getElementById('timerResumeHint');
                 if (hint) hint.style.display = 'none';
 
@@ -1721,6 +1766,7 @@ function startCountdown() {
     }, 60000);
 
     tickCountdown();
+    renderNextAction('running');
 }
 
 // ===== Wall-Clock Catch-Up Helper to Eliminate Timer Drift =====
@@ -2123,6 +2169,7 @@ async function requestSpringboardStop() {
         hint.textContent = '⏸️ Paused. When resuming on desktop, click Start timer on Springboard, then re-enable Live Increment or Sync.';
         hint.style.display = 'block';
     }
+    renderNextAction('stopped');
 
     // 3. Save Paused State immediately to Neon DB
     saveSession();
@@ -3850,11 +3897,25 @@ async function initApp() {
         (async () => {
             await flushOfflineQueue();
             await revalidateNeonSession(userPin, state.workDate);
+            if (state.isLiveIncrement && state.remainingSeconds > 0) {
+                renderNextAction('running');
+            } else if (!state.isLiveIncrement && state.loggedSeconds > 0) {
+                renderNextAction('stopped');
+            }
         })().catch(e => {
             console.warn('snip8: background revalidation error:', e);
         });
     } else {
         updateNeonBadge('offline', 'Offline Mode');
+    }
+
+    // 5. Contextual Next Action Banner setup on load
+    if (!state.loggedSeconds && (!state.remainingSeconds || state.remainingSeconds === TARGET_DAILY_SEC)) {
+        renderNextAction('welcome');
+    } else if (!state.isLiveIncrement) {
+        renderNextAction('stopped');
+    } else {
+        renderNextAction('running');
     }
 }
 window.initApp = initApp;

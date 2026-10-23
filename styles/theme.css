@@ -390,3 +390,25 @@ html, body {
     border-color: #cbd5e1 !important;
 }
 
+/* Instructions Tab Adaptive Styling */
+[data-theme='light'] #instructionsHeader {
+    background: #f1f5f9 !important;
+    border-color: #e2e8f0 !important;
+    color: #1e293b !important;
+}
+
+[data-theme='light'] #instructionsHeader h2 {
+    color: #0f172a !important;
+}
+
+[data-theme='light'] #instructionsHeader p {
+    color: #475569 !important;
+}
+
+[data-theme='light'] #step1FeatureBox {
+    background-color: #f8fafc !important;
+    border-color: #e2e8f0 !important;
+    color: #334155 !important;
+}
+
+

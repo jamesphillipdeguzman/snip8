@@ -181,6 +181,14 @@
 
         <!-- TAB 1: TIMER (Default Active View) -->
         <main id="timerTab" class="tab-content space-y-5">
+        <!-- Contextual Next Action Dynamic Banner -->
+        <div id="nextActionBanner" class="w-full px-4 py-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 flex items-center justify-between border shadow-sm">
+            <div class="flex items-center gap-2" id="nextActionContent">
+                <!-- Populated dynamically via JS -->
+            </div>
+            <button id="dismissActionBanner" type="button" class="text-xs opacity-60 hover:opacity-100 ml-2 p-1" title="Dismiss">✕</button>
+        </div>
+
         <!-- Screenshot Drop / Paste Zone -->
         <section id="dropZone"
             class="border-2 border-dashed border-slate-800 hover:border-emerald-500 bg-slate-900/50 hover:bg-slate-900/80 rounded-2xl p-8 text-center cursor-pointer transition flex flex-col items-center justify-center gap-2.5 shadow-lg group">
@@ -270,10 +278,10 @@
                     <span class="text-slate-600 hidden sm:inline">•</span>
                     <span class="text-[11px] text-slate-400">Tick logged hours upward while timer runs</span>
                 </div>
-                <label class="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-400 hover:text-slate-200">
+                <label class="inline-flex items-center gap-2.5 cursor-pointer select-none px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800/90 border border-slate-300 dark:border-slate-700 hover:bg-slate-200/70 dark:hover:bg-slate-700/80 transition-all shadow-sm">
+                    <span id="liveIncrementLabel" class="text-xs font-bold text-emerald-700 dark:text-emerald-400 select-none">Live Increment</span>
                     <input type="checkbox" id="liveIncrementToggle" class="sr-only peer" checked>
-                    <div class="relative w-8 h-4 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
-                    <span class="font-mono">Live Increment</span>
+                    <div class="w-9 h-5 bg-slate-300 dark:bg-slate-700 border border-slate-400/60 dark:border-slate-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[1px] after:left-[1px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:shadow-md after:transition-all peer-checked:bg-emerald-600 peer-checked:border-emerald-700 relative"></div>
                 </label>
             </div>
 
@@ -486,7 +494,7 @@
         <!-- TAB 2: INSTRUCTIONS (User Guide & Workflow) -->
         <section id="instructionsTab" class="tab-content hidden space-y-6">
             <!-- Header Banner -->
-            <div class="bg-gradient-to-r from-slate-900 to-slate-900/80 border border-slate-800 p-6 rounded-2xl shadow-xl">
+            <div id="instructionsHeader" class="bg-gradient-to-r from-slate-900 to-slate-900/80 border border-slate-800 p-6 rounded-2xl shadow-xl">
                 <div class="flex items-center gap-3">
                     <span class="text-3xl">📖</span>
                     <div>
@@ -508,7 +516,7 @@
                         <p class="text-xs text-slate-300 leading-relaxed">
                             Create a browser bookmark named <strong class="text-emerald-400">Sync Bridge</strong> in Chrome or Edge, and paste the bookmarklet URL below.
                         </p>
-                        <div class="bg-slate-950/80 p-3 rounded-xl border border-slate-800 text-[11px] text-slate-400 space-y-1.5">
+                        <div id="step1FeatureBox" class="bg-slate-950/80 p-3 rounded-xl border border-slate-800 text-[11px] text-slate-400 space-y-1.5">
                             <div>• Zero extensions or permissions required.</div>
                             <div>• Injects a temporary green badge (<span class="text-emerald-400">Sync Bridge Connected</span>).</div>
                             <div>• Runs ambiently every 10s to capture remote stop requests.</div>
