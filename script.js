@@ -1398,28 +1398,47 @@ function initLiveIncrementToggle() {
         liveIncrementToggle.checked = true;
     }
 
-    liveIncrementToggle.addEventListener('change', () => {
-        const isChecked = liveIncrementToggle.checked;
-        state.isLiveIncrement = isChecked;
-        localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, isChecked);
-        if (isChecked) {
-            const hint = document.getElementById('timerResumeHint');
-            if (hint) hint.style.display = 'none';
-            if (!timerCompleted && state.remainingSeconds > 0 && !countdownInterval) {
-                timerStartTime = Date.now();
-                targetTimestamp = new Date(timerStartTime + state.remainingSeconds * 1000);
-                startCountdown();
+        liveIncrementToggle.addEventListener('change', () => {
+            const isChecked = liveIncrementToggle.checked;
+            state.isLiveIncrement = isChecked;
+            localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, isChecked);
+            if (isChecked) {
+                const hint = document.getElementById('timerResumeHint');
+                if (hint) hint.style.display = 'none';
+
+                // Clear remote stop signal so cross-device sync doesn't immediately re-pause
+                const pin = state.userPin || getUserPin();
+                if (pin) {
+                    fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&action=clear`, { method: 'POST' }).catch(() => {});
+                }
+
+                if (!timerCompleted && state.remainingSeconds > 0 && !countdownInterval) {
+                    timerStartTime = Date.now();
+                    targetTimestamp = new Date(timerStartTime + state.remainingSeconds * 1000);
+                    startCountdown();
+                    updateStopTimeDisplay();
+                }
+            } else {
+                // Clear the interval and timestamps when switched off
+                if (countdownInterval) {
+                    clearInterval(countdownInterval);
+                    countdownInterval = null;
+                }
+                if (window.countdownInterval) {
+                    clearInterval(window.countdownInterval);
+                    window.countdownInterval = null;
+                }
+                if (window.liveTimerInterval) {
+                    clearInterval(window.liveTimerInterval);
+                    window.liveTimerInterval = null;
+                }
+                clearCountdownTimers();
+                timerStartTime = null;
+                targetTimestamp = null;
                 updateStopTimeDisplay();
             }
-        } else {
-            // CLEAR THE INTERVAL WHEN SWITCHED OFF
-            if (countdownInterval) {
-                clearInterval(countdownInterval);
-                countdownInterval = null;
-            }
-        }
-        updateLoggedDisplays();
-    });
+            updateLoggedDisplays();
+        });
 }
 
 // options.restore = { startTime, target, alarmDismissed } when hydrating from localStorage
@@ -1870,24 +1889,27 @@ async function requestSpringboardStop() {
         btn.textContent = 'Signaling Stop...';
     }
 
-    // 1. Immediately Pause the Local Timer
-    // Disable live increment so countdown doesn't drift while Springboard is stopped
-    const liveToggle = document.getElementById('liveIncrementToggle');
-    const wasLiveEnabled = liveToggle ? liveToggle.checked : state.isLiveIncrement;
-
-    let elapsed = 0;
-    // Clear the active timer loop immediately
-    if (countdownInterval) {
+    // 1. Completely halt all countdown and display loops
+    if (typeof countdownInterval !== 'undefined' && countdownInterval) {
         clearInterval(countdownInterval);
         countdownInterval = null;
     }
-
-    // Turn off the toggle UI and state
-    if (liveToggle) {
-        liveToggle.checked = false;
+    if (window.countdownInterval) {
+        clearInterval(window.countdownInterval);
+        window.countdownInterval = null;
     }
-    state.isLiveIncrement = false;
-    localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, 'false');
+    if (window.liveTimerInterval) {
+        clearInterval(window.liveTimerInterval);
+        window.liveTimerInterval = null;
+    }
+    clearCountdownTimers();
+
+    // Commit any active elapsed time into base totals before zeroing timerStartTime
+    const liveToggle = document.getElementById('liveIncrementToggle') || 
+                       document.getElementById('liveIncrementSwitch');
+    const wasLiveEnabled = liveToggle ? liveToggle.checked : state.isLiveIncrement;
+
+    let elapsed = 0;
     if (wasLiveEnabled && timerStartTime && !timerCompleted) {
         elapsed = getElapsedSeconds();
         baseTodaySec += elapsed;
@@ -1895,7 +1917,6 @@ async function requestSpringboardStop() {
         state.loggedSeconds = baseTodaySec;
         state.totalLoggedSeconds = baseTodaySec;
         state.remainingSeconds = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - baseTodaySec);
-        timerStartTime = null;
 
         if (detectedDays[selectedDayIndex]) {
             detectedDays[selectedDayIndex].sec = baseTodaySec;
@@ -1905,20 +1926,20 @@ async function requestSpringboardStop() {
         }
     }
 
+    // Nullify timestamps so background delta math stops recalculating
+    timerStartTime = null;
+    targetTimestamp = null;
+
+    // Toggle off live increment state and UI
     if (liveToggle) {
         liveToggle.checked = false;
     }
+    state.isLiveIncrement = false;
     try {
         localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, 'false');
     } catch (e) { }
-    state.isLiveIncrement = false;
 
-    if (window.liveTimerInterval) {
-        clearInterval(window.liveTimerInterval);
-        window.liveTimerInterval = null;
-    }
-    clearCountdownTimers();
-
+    // Force a static UI redraw with current banked values
     updateLoggedDisplays();
     updateStopTimeDisplay();
 
@@ -1931,7 +1952,7 @@ async function requestSpringboardStop() {
         hint.style.display = 'block';
     }
 
-    // 3. Save Paused State to Neon DB
+    // 3. Save Paused State immediately to Neon DB
     saveSession();
     saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { silent: true });
 
@@ -1956,6 +1977,85 @@ async function requestSpringboardStop() {
     }
 }
 window.requestSpringboardStop = requestSpringboardStop;
+
+// ===== Cross-Device Stop Synchronization =====
+function initCrossDeviceSyncListener() {
+    if (window.crossDeviceSyncInterval) return;
+
+    window.crossDeviceSyncInterval = setInterval(async () => {
+        // Only check if local state currently thinks it's ticking
+        if (!state.isLiveIncrement) return;
+
+        try {
+            const pin = state.userPin || localStorage.getItem('snip8_user_pin');
+            if (!pin) return;
+
+            // Check remote signal endpoint
+            const res = await fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}`);
+            const data = await res.json();
+
+            // If remote session is marked stopped or a stop was triggered
+            if (data && data.stop_requested) {
+                console.log('[snip8] Detected remote stop trigger from another device. Pausing local timer...');
+
+                if (timerStartTime && !timerCompleted) {
+                    const elapsed = getElapsedSeconds();
+                    baseTodaySec += elapsed;
+                    baseTotalTrackedSec += elapsed;
+                    state.loggedSeconds = baseTodaySec;
+                    state.totalLoggedSeconds = baseTodaySec;
+                    state.remainingSeconds = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - baseTodaySec);
+                    if (detectedDays[selectedDayIndex]) {
+                        detectedDays[selectedDayIndex].sec = baseTodaySec;
+                        detectedDays[selectedDayIndex].h = Math.floor(baseTodaySec / 3600);
+                        detectedDays[selectedDayIndex].m = Math.floor((baseTodaySec % 3600) / 60);
+                        detectedDays[selectedDayIndex].s = baseTodaySec % 60;
+                    }
+                }
+
+                if (typeof countdownInterval !== 'undefined' && countdownInterval) {
+                    clearInterval(countdownInterval);
+                    countdownInterval = null;
+                }
+                if (window.countdownInterval) {
+                    clearInterval(window.countdownInterval);
+                    window.countdownInterval = null;
+                }
+                if (window.liveTimerInterval) {
+                    clearInterval(window.liveTimerInterval);
+                    window.liveTimerInterval = null;
+                }
+                clearCountdownTimers();
+
+                timerStartTime = null;
+                targetTimestamp = null;
+                state.isLiveIncrement = false;
+                try {
+                    localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, 'false');
+                } catch (e) { }
+
+                const liveToggle = document.getElementById('liveIncrementToggle') || 
+                                   document.getElementById('liveIncrementSwitch');
+                if (liveToggle) liveToggle.checked = false;
+
+                updateLoggedDisplays();
+                updateStopTimeDisplay();
+
+                const hint = document.getElementById('timerResumeHint');
+                if (hint) {
+                    hint.textContent = '⏸️ Springboard stopped remotely. Local countdown paused.';
+                    hint.style.display = 'block';
+                }
+
+                saveSession();
+                saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { silent: true });
+            }
+        } catch (err) {
+            console.debug('[snip8 sync error]', err);
+        }
+    }, 10000);
+}
+window.initCrossDeviceSyncListener = initCrossDeviceSyncListener;
 
 const btnStopSpringboard = document.getElementById('btnStopSpringboard');
 if (btnStopSpringboard) {
@@ -2038,6 +2138,7 @@ async function refreshSnip8Session() {
             targetTimestamp = new Date(timerStartTime + remSec * 1000);
             startCountdown();
             updateStopTimeDisplay();
+            fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&action=clear`, { method: 'POST' }).catch(() => {});
         }
 
         // Update UI displays
@@ -3304,6 +3405,7 @@ async function initApp() {
 
     Snip8Theme.init();
     initLiveIncrementToggle();
+    initCrossDeviceSyncListener();
     initImagePreviewCard();
     updatePinUI();
 
