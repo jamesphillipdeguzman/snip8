@@ -1874,6 +1874,127 @@
             btnStopSpringboard.addEventListener('click', requestSpringboardStop);
         }
 
+        // Helper to manually sync and refresh data from Neon DB
+        async function refreshSnip8Session() {
+            const btn = document.getElementById('btnRefreshSession');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '🔄 Syncing...';
+            }
+
+            try {
+                const pin = state.userPin || getUserPin();
+                const todayStr = new Date().toLocaleDateString('en-CA');
+                const workDate = state.workDate || todayStr;
+
+                if (!pin) {
+                    openPinModal();
+                    updateNeonBadge('ready', 'Enter PIN');
+                    throw new Error('Please enter your PIN to sync');
+                }
+
+                updateNeonBadge('syncing', 'Syncing...');
+                const res = await fetch(`/api/snip8-session?pin=${encodeURIComponent(pin)}&work_date=${encodeURIComponent(workDate)}`, {
+                    headers: { 'x-user-pin': pin }
+                });
+
+                if (res.status === 401) {
+                    clearUserPin();
+                    openPinModal();
+                    throw new Error('PIN unauthorized');
+                }
+
+                if (!res.ok) {
+                    throw new Error(`Server returned HTTP ${res.status}`);
+                }
+
+                const data = await res.json();
+                if (!data.success || !data.session) {
+                    throw new Error(data.error || 'Failed to retrieve cloud session');
+                }
+
+                const row = data.session;
+                state.workDate = row.work_date || workDate;
+                const dbLogged = Number(row.logged_seconds) || 0;
+                const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
+                const remSec = row.total_seconds_remaining !== undefined
+                    ? Number(row.total_seconds_remaining)
+                    : Math.max(0, dailyCap - dbLogged);
+
+                state.loggedSeconds = dbLogged;
+                state.totalLoggedSeconds = dbLogged;
+                state.remainingSeconds = remSec;
+                state.dailyCapSeconds = dailyCap;
+                baseTodaySec = dbLogged;
+                baseTotalTrackedSec = Math.max(baseTotalTrackedSec, dbLogged);
+                totalTrackedSec = baseTotalTrackedSec;
+
+                if (row.timesheet_data) {
+                    detectedDays = hydrateBreakdownFromTimesheetData(row.timesheet_data, row.work_date || workDate, dbLogged);
+                    state.detectedDays = detectedDays;
+                    state.timesheetData = detectedDays;
+                }
+
+                if (row.last_scanned_image_url) {
+                    state.lastScannedImageUrl = row.last_scanned_image_url;
+                    renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
+                }
+
+                const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
+                if (dbLogged >= dailyCap) {
+                    timerCompleted = true;
+                    completedElapsedSec = 0;
+                    clearCountdownTimers();
+                } else if (isLiveEnabled) {
+                    timerStartTime = Date.now();
+                    targetTimestamp = new Date(timerStartTime + remSec * 1000);
+                    startCountdown();
+                    updateStopTimeDisplay();
+                }
+
+                // Update UI displays
+                renderTimesheetBreakdown({
+                    restore: {
+                        startTime: timerStartTime || Date.now(),
+                        target: targetTimestamp || new Date(),
+                        alarmDismissed: remSec <= 0
+                    }
+                });
+                updateLoggedDisplays();
+                updateSessionMeta('neon');
+                updateNeonBadge('synced', 'Neon Synced');
+
+                // Cache locally
+                localStorage.setItem('snip8_cache_' + pin + '_' + (row.work_date || workDate), JSON.stringify(row));
+                localStorage.setItem('snip8_detectedDays_' + pin + '_' + (row.work_date || workDate), JSON.stringify(detectedDays));
+                saveSession();
+
+                setValidationProgress(100, 'Synced with Neon DB!', 'success');
+                setTimeout(() => {
+                    const vp = document.getElementById('validationProgressContainer');
+                    if (vp) vp.style.display = 'none';
+                }, 1500);
+            } catch (err) {
+                console.error('Manual refresh failed:', err);
+                setValidationProgress(100, `Sync Error: ${err.message}`, 'error');
+                setTimeout(() => {
+                    const vp = document.getElementById('validationProgressContainer');
+                    if (vp) vp.style.display = 'none';
+                }, 2500);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '🔄 Sync';
+                }
+            }
+        }
+        window.refreshSnip8Session = refreshSnip8Session;
+
+        const refreshBtn = document.getElementById('btnRefreshSession');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', refreshSnip8Session);
+        }
+
         document.getElementById('resetBtn').addEventListener('click', () => {
             silenceAlarm();
             clearCountdownTimers();
