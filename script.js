@@ -280,6 +280,14 @@
                     bar.style.width = '0%';
                     bar.style.background = 'linear-gradient(90deg, #3b82f6, #6366f1)';
                 }, 2500);
+            } else if (state === 'warning') {
+                bar.style.background = '#f59e0b'; // Amber Warning
+                if (spinner) spinner.style.display = 'none';
+                setTimeout(() => {
+                    container.style.display = 'none';
+                    bar.style.width = '0%';
+                    bar.style.background = 'linear-gradient(90deg, #3b82f6, #6366f1)';
+                }, 3500);
             } else if (state === 'error') {
                 bar.style.background = '#ef4444'; // Red
                 if (spinner) spinner.style.display = 'none';
@@ -1391,7 +1399,19 @@
             }
 
             liveIncrementToggle.addEventListener('change', () => {
-                localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, liveIncrementToggle.checked);
+                const isChecked = liveIncrementToggle.checked;
+                state.isLiveIncrement = isChecked;
+                localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, isChecked);
+                if (isChecked) {
+                    const hint = document.getElementById('timerResumeHint');
+                    if (hint) hint.style.display = 'none';
+                    if (!timerCompleted && state.remainingSeconds > 0 && !countdownInterval) {
+                        timerStartTime = Date.now();
+                        targetTimestamp = new Date(timerStartTime + state.remainingSeconds * 1000);
+                        startCountdown();
+                        updateStopTimeDisplay();
+                    }
+                }
                 updateLoggedDisplays();
             });
         }
@@ -1844,6 +1864,60 @@
                 btn.textContent = 'Signaling Stop...';
             }
 
+            // 1. Immediately Pause the Local Timer
+            // Disable live increment so countdown doesn't drift while Springboard is stopped
+            const liveToggle = document.getElementById('liveIncrementToggle');
+            const wasLiveEnabled = liveToggle ? liveToggle.checked : state.isLiveIncrement;
+
+            let elapsed = 0;
+            if (wasLiveEnabled && timerStartTime && !timerCompleted) {
+                elapsed = getElapsedSeconds();
+                baseTodaySec += elapsed;
+                baseTotalTrackedSec += elapsed;
+                state.loggedSeconds = baseTodaySec;
+                state.totalLoggedSeconds = baseTodaySec;
+                state.remainingSeconds = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - baseTodaySec);
+                timerStartTime = null;
+
+                if (detectedDays[selectedDayIndex]) {
+                    detectedDays[selectedDayIndex].sec = baseTodaySec;
+                    detectedDays[selectedDayIndex].h = Math.floor(baseTodaySec / 3600);
+                    detectedDays[selectedDayIndex].m = Math.floor((baseTodaySec % 3600) / 60);
+                    detectedDays[selectedDayIndex].s = baseTodaySec % 60;
+                }
+            }
+
+            if (liveToggle) {
+                liveToggle.checked = false;
+            }
+            try {
+                localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, 'false');
+            } catch (e) { }
+            state.isLiveIncrement = false;
+
+            if (window.liveTimerInterval) {
+                clearInterval(window.liveTimerInterval);
+                window.liveTimerInterval = null;
+            }
+            clearCountdownTimers();
+
+            updateLoggedDisplays();
+            updateStopTimeDisplay();
+
+            // 2. Update UI Status & Feedback
+            setValidationProgress(100, '⏹️ Springboard timer stopped. Live countdown paused.', 'warning');
+
+            const hint = document.getElementById('timerResumeHint');
+            if (hint) {
+                hint.textContent = '⏸️ Paused. When resuming on desktop, click Start timer on Springboard, then re-enable Live Increment or Sync.';
+                hint.style.display = 'block';
+            }
+
+            // 3. Save Paused State to Neon DB
+            saveSession();
+            saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { silent: true });
+
+            // 4. Dispatch Remote Stop Signal to backend bridge
             try {
                 const res = await fetch(`/api/timer-signal?pin=${encodeURIComponent(state.userPin || 'default')}&action=set`, {
                     method: 'POST'
@@ -1851,17 +1925,13 @@
                 const data = await res.json();
 
                 if (res.ok && data.success) {
-                    setValidationProgress(100, 'Stop signal dispatched! Springboard bridge is clocking out...', 'success');
                     if (btn) btn.textContent = 'Stop Requested ⏹️';
-                    const liveToggle = document.getElementById('liveIncrementToggle');
-                    if (liveToggle) liveToggle.checked = false;
-                    state.isLiveIncrement = false;
                 } else {
                     throw new Error(data.error || 'Failed to dispatch stop signal');
                 }
             } catch (err) {
                 console.error('Remote stop failed:', err);
-                setValidationProgress(100, `Bridge Error: ${err.message}`, 'error');
+                setValidationProgress(100, `Bridge Warning: ${err.message}`, 'warning');
                 if (btn) btn.textContent = '⏹️ Stop Springboard';
             } finally {
                 if (btn) btn.disabled = false;
@@ -1968,6 +2038,8 @@
                 localStorage.setItem('snip8_cache_' + pin + '_' + (row.work_date || workDate), JSON.stringify(row));
                 localStorage.setItem('snip8_detectedDays_' + pin + '_' + (row.work_date || workDate), JSON.stringify(detectedDays));
                 saveSession();
+                const hint = document.getElementById('timerResumeHint');
+                if (hint) hint.style.display = 'none';
 
                 setValidationProgress(100, 'Synced with Neon DB!', 'success');
                 setTimeout(() => {
@@ -2007,6 +2079,8 @@
             updateLoggedDisplays();
             debouncedSaveSession();
             springboardAutoStopped = false;
+            const hint = document.getElementById('timerResumeHint');
+            if (hint) hint.style.display = 'none';
             const btnSpringboard = document.getElementById('btnStopSpringboard');
             if (btnSpringboard) {
                 btnSpringboard.textContent = '⏹️ Stop Springboard';
@@ -2017,6 +2091,8 @@
         document.getElementById('clearSessionBtn').addEventListener('click', () => {
             if (!confirm('Clear the saved timesheet session? You will need to paste a new screenshot.')) return;
             clearSession();
+            const hint = document.getElementById('timerResumeHint');
+            if (hint) hint.style.display = 'none';
             try {
                 const pin = getUserPin();
                 if (pin) {
