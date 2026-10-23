@@ -1375,13 +1375,23 @@ function updateLoggedDisplays() {
         }
     }
 
-    const currentTodaySec = baseTodaySec + elapsed;
-    const currentTotalSec = baseTotalTrackedSec + elapsed;
+    let currentTodaySec = baseTodaySec + elapsed;
+    let remSec = Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
+
+    // If targetTimestamp is set, anchor directly against absolute wall-clock
+    if (isLiveEnabled && targetTimestamp && !timerCompleted) {
+        const targetMs = targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp);
+        const msRemaining = targetMs - Date.now();
+        remSec = Math.max(0, Math.round(msRemaining / 1000));
+        currentTodaySec = Math.max(currentTodaySec, TARGET_DAILY_SEC - remSec);
+    }
+
+    state.loggedSeconds = currentTodaySec;
+    state.totalLoggedSeconds = currentTodaySec;
+    state.remainingSeconds = remSec;
 
     dispTodayLogged.textContent = formatHms(currentTodaySec);
-    dispTotalTracked.textContent = formatHms(currentTotalSec);
-
-    const remSec = Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
+    dispTotalTracked.textContent = formatHms(baseTotalTrackedSec + (currentTodaySec - baseTodaySec));
     dispRemaining.textContent = formatHms(remSec);
 
     const today = detectedDays[selectedDayIndex] || { label: 'Active Day' };
@@ -1571,12 +1581,20 @@ function tickCountdown() {
         }
         return;
     }
-    if (!targetTimestamp) return;
+
+    // Recalculate remaining seconds based on absolute target timestamp
+    if (targetTimestamp) {
+        const targetMs = targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp);
+        const msRemaining = targetMs - Date.now();
+        state.remainingSeconds = Math.max(0, Math.round(msRemaining / 1000));
+    } else {
+        state.remainingSeconds = Math.max(0, state.remainingSeconds - 1);
+    }
 
     // Ensure the ticker does NOT recalculate and overwrite logged_seconds if the daily cap has been reached
     // or if an AI sync is currently committing to the database
-    if (state.isAiSyncing || baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
-        if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+    if (state.isAiSyncing || baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC || state.remainingSeconds <= 0) {
+        if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC || state.remainingSeconds <= 0) {
             countdown.textContent = "00:00:00";
             countdown.classList.remove('text-white');
             countdown.classList.add('text-emerald-400');
@@ -1584,9 +1602,13 @@ function tickCountdown() {
             timerCompleted = true;
             completedElapsedSec = 0;
             state.remainingSeconds = 0;
-            dispRemaining.textContent = formatHms(0);
-            dispTodayLogged.textContent = formatHms(state.loggedSeconds || baseTodaySec);
-            dispTotalTracked.textContent = formatHms(state.loggedSeconds || totalTrackedSec);
+            state.isLiveIncrement = false;
+            try { localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, 'false'); } catch (e) { }
+            const liveToggle = document.getElementById('liveIncrementToggle') || document.getElementById('liveIncrementSwitch');
+            if (liveToggle) liveToggle.checked = false;
+            updateLoggedDisplays();
+            updateStopTimeDisplay();
+            debouncedSaveSession();
             if (!alarmDismissed) triggerAlarm();
             if (!springboardAutoStopped) {
                 springboardAutoStopped = true;
@@ -1596,36 +1618,14 @@ function tickCountdown() {
         return;
     }
 
-    const diffMs = targetTimestamp - Date.now();
-
-    if (diffMs <= 0) {
-        countdown.textContent = "00:00:00";
-        countdown.classList.remove('text-white');
-        countdown.classList.add('text-emerald-400');
-        clearCountdownTimers();
-        timerCompleted = true;
-        // Freeze at the moment the target was hit (not "now") so throttled background ticks
-        // or a late page reload don't over-count logged time.
-        completedElapsedSec = timerStartTime
-            ? Math.max(0, Math.round((targetTimestamp - timerStartTime) / 1000))
-            : 0;
-        updateLoggedDisplays();
-        debouncedSaveSession();
-        if (!alarmDismissed) triggerAlarm();
-        if (!springboardAutoStopped) {
-            springboardAutoStopped = true;
-            requestSpringboardStop();
-        }
-        return;
-    }
-
-    const sec = Math.floor(diffMs / 1000);
+    const sec = state.remainingSeconds;
     const h = String(Math.floor(sec / 3600)).padStart(2, '0');
     const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
     const s = String(sec % 60).padStart(2, '0');
     countdown.textContent = `${h}:${m}:${s}`;
 
     updateLoggedDisplays();
+    updateStopTimeDisplay();
 }
 
 function startCountdown() {
@@ -1663,6 +1663,52 @@ function startCountdown() {
     }, 60000);
 
     tickCountdown();
+}
+
+// ===== Wall-Clock Catch-Up Helper to Eliminate Timer Drift =====
+function applyWallClockCatchUp(sessionData, dailyCap = TARGET_DAILY_SEC) {
+    if (!sessionData) {
+        return {
+            loggedSeconds: 0,
+            remainingSeconds: dailyCap,
+            isRemoteRunning: false,
+            elapsedSinceSave: 0
+        };
+    }
+
+    const sessionUpdatedAt = sessionData.updated_at ? new Date(sessionData.updated_at).getTime() : null;
+    let elapsedSinceSave = 0;
+
+    if (sessionUpdatedAt && !isNaN(sessionUpdatedAt)) {
+        elapsedSinceSave = Math.max(0, Math.floor((Date.now() - sessionUpdatedAt) / 1000));
+    }
+
+    let td = sessionData.timesheet_data;
+    if (typeof td === 'string') {
+        try { td = JSON.parse(td); } catch (e) { td = null; }
+    }
+    const isRemoteRunning = td?.isLiveIncrement ?? sessionData.isLiveIncrement ?? sessionData.is_live_increment ?? false;
+
+    const baseRemSec = sessionData.total_seconds_remaining !== undefined
+        ? Number(sessionData.total_seconds_remaining)
+        : (sessionData.remaining_seconds !== undefined ? Number(sessionData.remaining_seconds) : Math.max(0, dailyCap - (Number(sessionData.logged_seconds) || 0)));
+    const baseLoggedSec = Number(sessionData.logged_seconds) || 0;
+
+    let adjustedRemSec = baseRemSec;
+    let adjustedLoggedSec = baseLoggedSec;
+
+    if (isRemoteRunning && elapsedSinceSave > 0) {
+        // Catch up the running timer values to the current second
+        adjustedRemSec = Math.max(0, baseRemSec - elapsedSinceSave);
+        adjustedLoggedSec = Math.min(dailyCap, baseLoggedSec + elapsedSinceSave);
+    }
+
+    return {
+        loggedSeconds: adjustedLoggedSec,
+        remainingSeconds: adjustedRemSec,
+        isRemoteRunning: Boolean(isRemoteRunning),
+        elapsedSinceSave
+    };
 }
 
 // ===== Silent Background Sync & Mobile/Desktop Handoff =====
@@ -1716,14 +1762,27 @@ async function handleReturningToForeground() {
     lastForegroundSyncTime = now;
 
     const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
-    const currentLogged = state.totalLoggedSeconds || state.loggedSeconds || baseTodaySec;
     const dailyCap = state.dailyCapSeconds || TARGET_DAILY_SEC;
 
     // 1. Seamlessly resume local ticker if enabled and daily cap not reached
-    if (isLiveEnabled && currentLogged < dailyCap && !timerCompleted) {
-        timerStartTime = Date.now();
-        const remSec = Math.max(0, dailyCap - baseTodaySec);
-        targetTimestamp = new Date(timerStartTime + remSec * 1000);
+    if (isLiveEnabled && !timerCompleted) {
+        if (targetTimestamp && (targetTimestamp - Date.now()) > 0) {
+            // Anchor against existing absolute target timestamp so sleeping screen doesn't cause drift
+            const msRemaining = (targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp)) - Date.now();
+            const remSec = Math.max(0, Math.round(msRemaining / 1000));
+            state.remainingSeconds = remSec;
+            const newLogged = Math.min(dailyCap, dailyCap - remSec);
+            baseTodaySec = Math.max(baseTodaySec, newLogged);
+            baseTotalTrackedSec = Math.max(baseTotalTrackedSec, baseTodaySec);
+            state.loggedSeconds = baseTodaySec;
+            state.totalLoggedSeconds = baseTodaySec;
+            timerStartTime = Date.now();
+            targetTimestamp = new Date(Date.now() + remSec * 1000);
+        } else {
+            timerStartTime = Date.now();
+            const remSec = Math.max(0, dailyCap - baseTodaySec);
+            targetTimestamp = new Date(timerStartTime + remSec * 1000);
+        }
         startCountdown();
         updateStopTimeDisplay();
         updateLoggedDisplays();
@@ -1750,13 +1809,15 @@ async function handleReturningToForeground() {
         const row = data?.row || data?.session;
 
         if (row && !row.is_fresh_default) {
-            const remoteLogged = Number(row.logged_seconds) || 0;
+            const catchUp = applyWallClockCatchUp(row, dailyCap);
+            const remoteLogged = catchUp.loggedSeconds;
+            const remoteRem = catchUp.remainingSeconds;
 
             // Monotonic fast-forward: if another device progressed further, silently update
             if (remoteLogged > (state.totalLoggedSeconds || state.loggedSeconds || 0)) {
                 state.totalLoggedSeconds = remoteLogged;
                 state.loggedSeconds = remoteLogged;
-                state.remainingSeconds = Math.max(0, dailyCap - remoteLogged);
+                state.remainingSeconds = remoteRem;
 
                 baseTodaySec = remoteLogged;
                 baseTotalTrackedSec = Math.max(baseTotalTrackedSec, remoteLogged);
@@ -1771,12 +1832,13 @@ async function handleReturningToForeground() {
                     renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
                 }
 
-                if (remoteLogged >= dailyCap) {
+                if (remoteLogged >= dailyCap || remoteRem <= 0) {
                     timerCompleted = true;
+                    completedElapsedSec = 0;
                     clearCountdownTimers();
-                } else if (isLiveEnabled) {
+                } else if (isLiveEnabled && catchUp.isRemoteRunning) {
                     timerStartTime = Date.now();
-                    targetTimestamp = new Date(timerStartTime + state.remainingSeconds * 1000);
+                    targetTimestamp = new Date(Date.now() + remoteRem * 1000);
                     startCountdown();
                     updateStopTimeDisplay();
                 }
@@ -1786,7 +1848,7 @@ async function handleReturningToForeground() {
                     restore: {
                         startTime: timerStartTime || Date.now(),
                         target: targetTimestamp || new Date(),
-                        alarmDismissed: state.remainingSeconds <= 0
+                        alarmDismissed: remoteRem <= 0
                     }
                 });
                 updateLoggedDisplays();
@@ -1803,6 +1865,14 @@ async function handleReturningToForeground() {
 }
 
 document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.isLiveIncrement && targetTimestamp) {
+        const targetMs = targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp);
+        const msRemaining = targetMs - Date.now();
+        state.remainingSeconds = Math.max(0, Math.round(msRemaining / 1000));
+        updateLoggedDisplays();
+        updateStopTimeDisplay();
+    }
+
     if (document.hidden) {
         handleGoingToBackground();
     } else {
@@ -2077,6 +2147,19 @@ function initCrossDeviceSyncListener() {
                 }
 
                 saveSession();
+            } else if (state.isLiveIncrement && data && data.session) {
+                // If remote session is live, prevent drift via wall-clock catch-up
+                const catchUp = applyWallClockCatchUp(data.session, state.dailyCapSeconds || TARGET_DAILY_SEC);
+                if (catchUp.loggedSeconds > (state.loggedSeconds || baseTodaySec)) {
+                    baseTodaySec = catchUp.loggedSeconds;
+                    state.loggedSeconds = catchUp.loggedSeconds;
+                    state.totalLoggedSeconds = catchUp.loggedSeconds;
+                    state.remainingSeconds = catchUp.remainingSeconds;
+                    timerStartTime = Date.now();
+                    targetTimestamp = new Date(Date.now() + catchUp.remainingSeconds * 1000);
+                    updateLoggedDisplays();
+                    updateStopTimeDisplay();
+                }
             }
         } catch (err) {
             console.debug('[snip8 sync error]', err);
@@ -2131,11 +2214,11 @@ async function refreshSnip8Session() {
 
         const row = data.session;
         state.workDate = row.work_date || workDate;
-        const dbLogged = Number(row.logged_seconds) || 0;
         const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
-        const remSec = row.total_seconds_remaining !== undefined
-            ? Number(row.total_seconds_remaining)
-            : Math.max(0, dailyCap - dbLogged);
+
+        const catchUp = applyWallClockCatchUp(row, dailyCap);
+        const dbLogged = catchUp.loggedSeconds;
+        const remSec = catchUp.remainingSeconds;
 
         state.loggedSeconds = dbLogged;
         state.totalLoggedSeconds = dbLogged;
@@ -2157,13 +2240,13 @@ async function refreshSnip8Session() {
         }
 
         const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
-        if (dbLogged >= dailyCap) {
+        if (dbLogged >= dailyCap || remSec <= 0) {
             timerCompleted = true;
             completedElapsedSec = 0;
             clearCountdownTimers();
         } else if (isLiveEnabled) {
             timerStartTime = Date.now();
-            targetTimestamp = new Date(timerStartTime + remSec * 1000);
+            targetTimestamp = new Date(Date.now() + remSec * 1000);
             startCountdown();
             updateStopTimeDisplay();
             fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&action=clear`, { method: 'POST' }).catch(() => {});
@@ -2850,11 +2933,10 @@ function loadCachedSession(userPin = getUserPin(), workDate = getWorkDate()) {
 
         // Normal path: current/today's cached session
         state.workDate = row.work_date || workDate || todayStr;
-        const logged = Number(row.logged_seconds) || 0;
         const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
-        const rem = row.total_seconds_remaining !== undefined
-            ? Number(row.total_seconds_remaining)
-            : Math.max(0, dailyCap - logged);
+        const catchUp = applyWallClockCatchUp(row, dailyCap);
+        const logged = catchUp.loggedSeconds;
+        const rem = catchUp.remainingSeconds;
 
         state.loggedSeconds = logged;
         state.remainingSeconds = rem;
@@ -2883,10 +2965,15 @@ function loadCachedSession(userPin = getUserPin(), workDate = getWorkDate()) {
         const updatedAt = new Date(row.updated_at || Date.now());
         const target = new Date(Date.now() + rem * 1000);
 
-        if (logged >= TARGET_DAILY_SEC) {
+        if (logged >= TARGET_DAILY_SEC || rem <= 0) {
             timerCompleted = true;
             completedElapsedSec = 0;
             clearCountdownTimers();
+        } else if (state.isLiveIncrement && catchUp.isRemoteRunning) {
+            timerStartTime = Date.now();
+            targetTimestamp = target;
+            startCountdown();
+            updateStopTimeDisplay();
         }
 
         renderTimesheetBreakdown({
@@ -2954,15 +3041,16 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
         }
 
         const localLogged = state.loggedSeconds || 0;
-        const dbLogged = Number(row.logged_seconds) || 0;
+        const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
+        const catchUp = applyWallClockCatchUp(row, dailyCap);
+        const dbLogged = catchUp.loggedSeconds;
+        const remSec = catchUp.remainingSeconds;
 
         // Monotonic Guard: Only accept DB state if it is higher than local,
         // or if DB has completed (>= 28800), or if local is completely uninitialized (0).
         if (dbLogged >= 28800 || dbLogged > localLogged || localLogged === 0) {
             state.loggedSeconds = dbLogged;
-            state.remainingSeconds = row.total_seconds_remaining !== undefined
-                ? Number(row.total_seconds_remaining)
-                : Math.max(0, TARGET_DAILY_SEC - dbLogged);
+            state.remainingSeconds = remSec;
             if (row.last_scanned_image_url) {
                 state.lastScannedImageUrl = row.last_scanned_image_url;
                 renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
@@ -2976,10 +3064,14 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
             baseTotalTrackedSec = Math.max(totalTrackedSec, dbLogged);
             totalTrackedSec = baseTotalTrackedSec;
 
-            if (dbLogged >= TARGET_DAILY_SEC) {
+            if (dbLogged >= TARGET_DAILY_SEC || remSec <= 0) {
                 timerCompleted = true;
                 completedElapsedSec = 0;
                 clearCountdownTimers();
+            } else if (state.isLiveIncrement && catchUp.isRemoteRunning) {
+                timerStartTime = Date.now();
+                targetTimestamp = new Date(Date.now() + remSec * 1000);
+                startCountdown();
             }
 
             // Update local cache to match the verified remote state
@@ -2989,7 +3081,7 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
             saveSession();
 
             const updatedAt = new Date(row.updated_at || Date.now());
-            const target = new Date(Date.now() + state.remainingSeconds * 1000);
+            const target = targetTimestamp || new Date(Date.now() + state.remainingSeconds * 1000);
             renderTimesheetBreakdown({
                 restore: {
                     startTime: updatedAt.getTime(),

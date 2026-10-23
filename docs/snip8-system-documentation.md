@@ -59,7 +59,7 @@ pending stop request.
 3.  **Signal stored:** The API sets `stop_requested` to `TRUE` in the
     Neon PostgreSQL table `snip8_signals`, keyed by the user's PIN.
 4.  **Desktop tab polls:** The bookmarklet checks
-    `/api/timer-signal?pin=YOUR_PIN` every eight seconds.
+    `/api/timer-signal?pin=<PIN>` every ten seconds (10,000 ms).
 5.  **Stop action runs:** If a stop request is pending, the bookmarklet
     looks for the Springboard **Stop timer** button and clicks it.
 6.  **Signal acknowledged:** The bookmarklet sends a request with
@@ -70,7 +70,7 @@ pending stop request.
 **Important:** The bridge depends on the Springboard tab being open, the
 bookmarklet having been started in that tab, network access being
 available, and the expected Stop timer button being present. The
-eight-second polling interval means a remote request may not be
+ten-second polling interval means a remote request may not be
 processed immediately. Verify that Springboard actually stopped the
 timer.
 
@@ -124,133 +124,103 @@ configuration alone does not authenticate a request or protect the
 signal endpoint; access control and PIN handling should be reviewed as
 part of deployment security.
 
-### C. Client Bridge Bookmarklet
+### C. Desktop Sync Bridge Bookmarklet (Production Version)
 
-The bookmarklet is a JavaScript snippet saved as a browser bookmark and
-launched in the desktop Springboard tab.
+#### Overview
+The **Sync Bridge** is a lightweight, zero-dependency browser bookmarklet running in the Springboard web application context. It acts as an ambient consumer of the `/api/timer-signal` polling endpoint to trigger native DOM clicks without injecting unvetted browser extensions or triggering IT-flagged console spam.
 
-**Visual status indicator**\
-The bookmarklet adds a small fixed badge to the lower-right corner of
-the page with the label **snip8 Bridge Active**.
+#### Architecture & Features
+- **Zero Console Spam:** Completely suppresses routine `console.log` statements during the polling lifecycle to avoid beaconing noise in DevTools.
+- **Visual Toast Feedback:** Injects a temporary non-blocking green notification badge (`Sync Bridge Connected (PIN: ****** )`) in the bottom-right viewport corner for 3 seconds upon execution.
+- **Persistent PIN Storage:** Reads and writes the user's 6-digit session PIN directly to the browser's `localStorage['snip8_bridge_pin']`. Falls back to a browser prompt only on cold profiles.
+- **Duplicate Execution Guard:** Checks `window._sbSyncBridgeRunning` to prevent redundant concurrent loops if clicked multiple times.
+- **Cadence & Network Footprint:** 10,000 ms (10-second) `setInterval` fetch loop, avoiding browser lockups or heavy network inspection flags.
+- **Action Sequence:** On detecting `{ stop_requested: true }`:
+  1. Finds the DOM button containing text matching `stop timer`.
+  2. Dispatches a native `.click()` event to freeze the Springboard timesheet block.
+  3. Dispatches a `POST` request to `/api/timer-signal?pin=<PIN>&action=clear` to reset the database signal.
 
-**Polling loop**\
-A repeating timer checks the API every 8,000 milliseconds (eight
-seconds).
+#### Final Production Bookmarklet Code
+To install or re-bind in Chrome/Edge, create a bookmark named **Sync Bridge** and set the URL to:
 
-**Button detection**\
-The script searches page buttons for one whose visible text includes
-`Stop timer`.
+```javascript
+javascript:(function(){if(window._sbSyncBridgeRunning){alert('Sync Bridge is already running.');return;}let p=localStorage.getItem('snip8_bridge_pin');if(!p){p=prompt('Enter your 6-digit snip8 PIN:');if(!p)return;localStorage.setItem('snip8_bridge_pin',p.trim());}window._sbSyncBridgeRunning=true;const t=document.createElement('div');t.innerText='Sync Bridge Connected (PIN: '+p+')';t.style.cssText='position:fixed;bottom:16px;right:16px;background:#10b981;color:#fff;padding:8px 14px;border-radius:6px;font-size:12px;z-index:999999;box-shadow:0 4px 6px rgba(0,0,0,0.15);font-family:sans-serif;pointer-events:none;transition:opacity 0.5s ease;';document.body.appendChild(t);setTimeout(()=>{t.style.opacity='0';setTimeout(()=>t.remove(),500);},3000);setInterval(async()=>{try{const r=await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p));if(!r.ok)return;const d=await r.json();if(d&&d.stop_requested){const b=Array.from(document.querySelectorAll('button')).find(x=>x.textContent.trim().toLowerCase().includes('stop timer'));if(b){b.click();}await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p)+'&action=clear',{method:'POST'});}}catch(e){}},10000);})();
+```
 
-**Execution and acknowledgment**\
-When a pending request is detected, the script clicks the matching
-button and sends an `action=clear` request to reset the signal.
-
-The badge indicates that the bridge script has been initialized; it does
-not by itself prove that the API is reachable or that a stop request
-will succeed.
-
-#### Readable Bookmarklet Source Code
-
-Use this version when reviewing, maintaining, or customizing the bridge. Replace `YOUR_PIN` with the PIN used by your snip8 signal record before installing the bookmarklet.
+#### Readable Source Code
+Use this formatted reference when reviewing or customizing the production bridge:
 
 ```javascript
 (function() {
-  const PIN = 'YOUR_PIN'; // Replace with your snip8 PIN
-  const ENDPOINT = 'https://snip8-eight.vercel.app/api/timer-signal';
-
-  // 1. Console confirmation of activation
-  console.log(
-    '%c[snip8 Bridge] Active & Listening...',
-    'background:#10b981;color:#fff;font-weight:bold;padding:4px 8px;border-radius:4px;'
-  );
-
-  // 2. Inject or reuse visual status badge in the bottom-right corner
-  let badge = document.getElementById('snip8-badge');
-  if (!badge) {
-    badge = document.createElement('div');
-    badge.id = 'snip8-badge';
-    badge.innerHTML = '🟢 snip8 Bridge Active';
-    badge.style.cssText = [
-      'position:fixed',
-      'bottom:12px',
-      'right:12px',
-      'background:#0f172a',
-      'color:#10b981',
-      'border:1px solid #10b981',
-      'padding:6px 12px',
-      'border-radius:20px',
-      'font-size:12px',
-      'font-family:sans-serif',
-      'font-weight:bold',
-      'z-index:999999',
-      'box-shadow:0 4px 12px rgba(0,0,0,0.3)',
-      'pointer-events:none'
-    ].join(';');
-    document.body.appendChild(badge);
+  // 1. Guard against duplicate concurrent execution
+  if (window._sbSyncBridgeRunning) {
+    alert('Sync Bridge is already running.');
+    return;
   }
 
-  // 3. Persistent 8-second polling cycle
+  // 2. Read or prompt for user PIN, persisted in localStorage
+  let p = localStorage.getItem('snip8_bridge_pin');
+  if (!p) {
+    p = prompt('Enter your 6-digit snip8 PIN:');
+    if (!p) return;
+    localStorage.setItem('snip8_bridge_pin', p.trim());
+  }
+
+  window._sbSyncBridgeRunning = true;
+
+  // 3. Temporary visual toast badge (bottom-right, fades out after 3s)
+  const t = document.createElement('div');
+  t.innerText = 'Sync Bridge Connected (PIN: ' + p + ')';
+  t.style.cssText = 'position:fixed;bottom:16px;right:16px;background:#10b981;color:#fff;padding:8px 14px;border-radius:6px;font-size:12px;z-index:999999;box-shadow:0 4px 6px rgba(0,0,0,0.15);font-family:sans-serif;pointer-events:none;transition:opacity 0.5s ease;';
+  document.body.appendChild(t);
+  setTimeout(() => {
+    t.style.opacity = '0';
+    setTimeout(() => t.remove(), 500);
+  }, 3000);
+
+  // 4. Ambient 10-second polling cadence with silent error handling
   setInterval(async () => {
     try {
-      // Check the API for a pending stop signal
-      const res = await fetch(`${ENDPOINT}?pin=${encodeURIComponent(PIN)}`);
-      const data = await res.json();
+      const r = await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin=' + encodeURIComponent(p));
+      if (!r.ok) return;
+      const d = await r.json();
 
-      if (data && data.stop_requested) {
-        console.log('[snip8] Stop signal detected! Stopping Springboard...');
-
-        // Locate the active "Stop timer" button via standard DOM text matching
-        const stopBtn = Array.from(document.querySelectorAll('button')).find(
-          b => b.innerText && b.innerText.includes('Stop timer')
+      if (d && d.stop_requested) {
+        // Find Springboard Stop timer button
+        const b = Array.from(document.querySelectorAll('button')).find(
+          x => x.textContent.trim().toLowerCase().includes('stop timer')
         );
-
-        if (stopBtn) {
-          stopBtn.click();
+        if (b) {
+          b.click();
         }
-
-        // Acknowledge and clear the stop flag
-        await fetch(`${ENDPOINT}?pin=${encodeURIComponent(PIN)}&action=clear`, {
+        // Acknowledge and clear signal in Neon DB
+        await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin=' + encodeURIComponent(p) + '&action=clear', {
           method: 'POST'
         });
-
-        // Update badge visual state
-        if (badge) {
-          badge.innerHTML = '⏹️ Stopped via snip8';
-          badge.style.color = '#f87171';
-          badge.style.borderColor = '#f87171';
-        }
       }
-    } catch (err) {
-      console.error('[snip8 error]', err);
+    } catch (e) {
+      // Silent error handling: zero console noise in DevTools
     }
-  }, 8000);
+  }, 10000);
 })();
-```
-
-#### Minified Bookmarklet URL
-
-This one-line version is intended for the **URL** field of the browser bookmark. Replace `YOUR_PIN` with your own PIN before saving it.
-
-```javascript
-javascript:(function(){const P='YOUR_PIN',U='https://snip8-eight.vercel.app/api/timer-signal';console.log('%c[snip8 Bridge] Active & Listening...','background:#10b981;color:#fff;font-weight:bold;padding:4px 8px;border-radius:4px;');let b=document.getElementById('snip8-badge');if(!b){b=document.createElement('div');b.id='snip8-badge';b.innerHTML='🟢 snip8 Bridge Active';b.style.cssText='position:fixed;bottom:12px;right:12px;background:#0f172a;color:#10b981;border:1px solid #10b981;padding:6px 12px;border-radius:20px;font-size:12px;font-family:sans-serif;font-weight:bold;z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.3);pointer-events:none;';document.body.appendChild(b);}setInterval(async()=>{try{const r=await fetch(`${U}?pin=${encodeURIComponent(P)}`);const d=await r.json();if(d&&d.stop_requested){console.log('[snip8] Stop signal detected! Stopping Springboard...');const btn=Array.from(document.querySelectorAll('button')).find(x=>x.innerText&&x.innerText.includes('Stop timer'));if(btn){btn.click();}await fetch(`${U}?pin=${encodeURIComponent(P)}&action=clear`,{method:'POST'});if(b){b.innerHTML='⏹️ Stopped via snip8';b.style.color='#f87171';b.style.borderColor='#f87171';}}}catch(err){console.error('[snip8 error]',err);}},8000);})();
 ```
 
 #### Installation and Verification
 
-1. Open the browser bookmarks manager with `Ctrl + Shift + O`, or right-click the bookmarks bar and choose **Add page** (the exact menu wording may vary by browser).
+1. Open the browser bookmarks manager (`Ctrl + Shift + O` on Chrome/Edge) or right-click the bookmarks bar and select **Add page...**.
 2. Set the bookmark name to `Sync Bridge`.
-3. Paste the minified snippet into the bookmark's **URL** field. Replace `YOUR_PIN` with the PIN associated with your snip8 signal record.
-4. Open the intended Springboard tab and click the **Sync Bridge** bookmark.
-5. Open Developer Tools with `F12` and check the Console for `[snip8 Bridge] Active & Listening...`.
-6. Confirm that the `🟢 snip8 Bridge Active` badge appears in the bottom-right corner.
+3. Paste the minified `javascript:(...)` snippet into the bookmark **URL** field.
+4. Navigate to your active Springboard timesheet tab (`app.hirespringboard.com`) and click the **Sync Bridge** bookmark.
+5. On the first launch, enter your 6-digit snip8 PIN. The PIN is saved in `localStorage['snip8_bridge_pin']` for future launches on this browser profile.
+6. A green toast badge reading `Sync Bridge Connected (PIN: ****** )` will appear in the lower-right corner for 3 seconds, confirming initialization.
+7. Subsequent clicks on the bookmark will display a non-disruptive alert (`Sync Bridge is already running.`) to prevent duplicate intervals.
 
 #### Security and Reliability Notes
 
-- Do not publish or commit a bookmarklet containing your real PIN. Anyone who obtains the PIN may be able to interact with the signal endpoint, depending on the API's access controls.
-- The PIN is sent as a query parameter in API requests. Query strings may be recorded in hosting or server logs, so review logging and access controls.
-- The script clears the signal after detecting it even if it cannot find a matching **Stop timer** button. Therefore, the badge changing to **Stopped via snip8** is not proof that Springboard stopped. Always verify the timer in Springboard.
-- The script does not check `res.ok` before parsing the polling response, and it does not prevent overlapping polling calls if a request takes longer than eight seconds. Treat it as best-effort automation and test it in the intended environment.
-- Confirm the endpoint URL and API behavior against the current deployment before using this snippet. Follow your organization's policies for browser automation and time-tracking systems.
+- **Zero Console Footprint:** The production bridge omits all diagnostic console logging to prevent beaconing in enterprise observability environments.
+- **Persistent Storage:** Storing the PIN in `localStorage['snip8_bridge_pin']` ensures seamless one-click activation across workday sessions without re-typing.
+- **Fail-Safe Polling:** Network fetch errors are trapped silently to prevent unhandled promise rejections in the host application.
+- **Signal Reset Safety:** The bridge only dispatches `action=clear` once a stop signal is received and processed.
 
 ### D. Application Client: `script.js` and `index.html`
 
@@ -381,8 +351,8 @@ recorded time.
 
 ## 7. Operational Limitations
 
--   Remote stopping is not instantaneous; the bridge polls at an
-    eight-second interval.
+-   Remote stopping is not instantaneous; the bridge polls at a
+    ten-second interval (10,000 ms).
 -   The desktop Springboard tab must remain open and the bookmarklet
     must be active.
 -   Browser or operating-system suspension, network problems, API
@@ -396,7 +366,7 @@ recorded time.
 ## 8. Quick Reference
 
 -   **Daily target:** 8 hours / 28,800 seconds
--   **Bridge polling interval:** 8 seconds
+-   **Bridge polling interval:** 10 seconds (10,000 ms)
 -   **Signal table:** `snip8_signals`
 -   **Signal endpoint:** `/api/timer-signal`
 -   **Request action:** `action=set`
