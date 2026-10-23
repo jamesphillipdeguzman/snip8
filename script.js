@@ -1361,6 +1361,7 @@ function updateLoggedDisplays() {
         }
         const today = detectedDays[selectedDayIndex] || { label: 'Active Day' };
         dispTodayLabel.textContent = `${today.label} Active Column • 8h Cap Reached`;
+        updateProgressBar(finalTodaySec);
         return;
     }
 
@@ -1397,7 +1398,64 @@ function updateLoggedDisplays() {
     const today = detectedDays[selectedDayIndex] || { label: 'Active Day' };
     const isRunningLive = isLiveEnabled && countdownInterval !== null;
     dispTodayLabel.textContent = `${today.label} Active Column${isRunningLive ? ' • Live' : ''}`;
+
+    updateProgressBar(currentTodaySec);
 }
+
+function updateProgressBar(loggedSeconds) {
+    const targetSeconds = state.dailyCapSeconds || TARGET_DAILY_SEC; // 28,800s
+    const graceWindowSeconds = targetSeconds + (5 * 60); // 29,100s
+    const percent = Math.min(105, (loggedSeconds / targetSeconds) * 100);
+
+    const bar = document.getElementById('shiftProgressBar');
+    const percentLabel = document.getElementById('progressBarPercent');
+    const label = document.getElementById('progressBarLabel');
+    const statusText = document.getElementById('progressStatusText');
+
+    if (!bar) return;
+
+    bar.style.width = Math.min(100, percent) + '%';
+    if (percentLabel) percentLabel.textContent = `${Math.floor(percent)}%`;
+    if (label) {
+        const hrs = Math.floor(loggedSeconds / 3600);
+        const mins = Math.floor((loggedSeconds % 3600) / 60);
+        const targetHrs = Math.floor(targetSeconds / 3600);
+        const targetMins = Math.floor((targetSeconds % 3600) / 60);
+        label.textContent = `Progress: ${hrs}h ${mins.toString().padStart(2, '0')}m / ${targetHrs}h ${targetMins.toString().padStart(2, '0')}m`;
+    }
+
+    // Dynamic policy coloring
+    if (loggedSeconds >= graceWindowSeconds) {
+        // > 8h 05m Violation
+        bar.className = 'h-full rounded-full transition-all duration-500 bg-red-600 animate-pulse';
+        if (statusText) {
+            statusText.className = 'text-center text-xs mt-1.5 font-bold text-red-400';
+            statusText.textContent = '⚠️ Policy Violation: Exceeded 8h 05m Grace Limit';
+        }
+    } else if (loggedSeconds >= targetSeconds) {
+        // 8h 00m to 8h 05m (Within Grace Window)
+        bar.className = 'h-full rounded-full transition-all duration-500 bg-amber-500';
+        if (statusText) {
+            statusText.className = 'text-center text-xs mt-1.5 font-semibold text-amber-400';
+            statusText.textContent = '⏱ 8h Target Reached! Inside 5m grace window. Stop now.';
+        }
+    } else if (loggedSeconds >= targetSeconds - (5 * 60)) {
+        // 7h 55m to 8h 00m (Compliant Window)
+        bar.className = 'h-full rounded-full transition-all duration-500 bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.5)]';
+        if (statusText) {
+            statusText.className = 'text-center text-xs mt-1.5 font-semibold text-emerald-400';
+            statusText.textContent = '✓ 100% Compliant Window (7h 55m - 8h 00m). Ready to stop.';
+        }
+    } else {
+        // Normal progress
+        bar.className = 'h-full rounded-full transition-all duration-500 bg-emerald-500';
+        if (statusText) {
+            statusText.className = 'text-center text-xs mt-1.5 font-medium text-slate-400';
+            statusText.textContent = 'Shift in progress';
+        }
+    }
+}
+window.updateProgressBar = updateProgressBar;
 
 function initLiveIncrementToggle() {
     if (!liveIncrementToggle) return;
@@ -1687,7 +1745,9 @@ function applyWallClockCatchUp(sessionData, dailyCap = TARGET_DAILY_SEC) {
     if (typeof td === 'string') {
         try { td = JSON.parse(td); } catch (e) { td = null; }
     }
-    const isRemoteRunning = td?.isLiveIncrement ?? sessionData.isLiveIncrement ?? sessionData.is_live_increment ?? false;
+    // Remote session is considered actively running unless explicitly false
+    const isExplicitlyPaused = (td?.isLiveIncrement === false || sessionData.isLiveIncrement === false || sessionData.is_live_increment === false);
+    const isRemoteRunning = !isExplicitlyPaused;
 
     const baseRemSec = sessionData.total_seconds_remaining !== undefined
         ? Number(sessionData.total_seconds_remaining)
@@ -1832,15 +1892,32 @@ async function handleReturningToForeground() {
                     renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
                 }
 
+                const isRemoteRunning = catchUp.isRemoteRunning;
+                state.isLiveIncrement = isRemoteRunning;
+                const liveToggle = document.getElementById('liveIncrementToggle') || 
+                                   document.getElementById('liveIncrementSwitch');
+                if (liveToggle) {
+                    liveToggle.checked = isRemoteRunning;
+                }
+                try {
+                    localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, String(isRemoteRunning));
+                } catch (e) { }
+
                 if (remoteLogged >= dailyCap || remoteRem <= 0) {
                     timerCompleted = true;
                     completedElapsedSec = 0;
+                    state.isLiveIncrement = false;
+                    if (liveToggle) liveToggle.checked = false;
                     clearCountdownTimers();
-                } else if (isLiveEnabled && catchUp.isRemoteRunning) {
+                } else if (state.isLiveIncrement) {
+                    timerCompleted = false;
+                    completedElapsedSec = 0;
                     timerStartTime = Date.now();
                     targetTimestamp = new Date(Date.now() + remoteRem * 1000);
                     startCountdown();
                     updateStopTimeDisplay();
+                } else {
+                    clearCountdownTimers();
                 }
 
                 // Re-render UI counters & table breakdown without reloading
@@ -2239,17 +2316,33 @@ async function refreshSnip8Session() {
             renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
         }
 
-        const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
+        const isRemoteRunning = catchUp.isRemoteRunning;
+        state.isLiveIncrement = isRemoteRunning;
+        const liveToggle = document.getElementById('liveIncrementToggle') || 
+                           document.getElementById('liveIncrementSwitch');
+        if (liveToggle) {
+            liveToggle.checked = isRemoteRunning;
+        }
+        try {
+            localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, String(isRemoteRunning));
+        } catch (e) { }
+
         if (dbLogged >= dailyCap || remSec <= 0) {
             timerCompleted = true;
             completedElapsedSec = 0;
+            state.isLiveIncrement = false;
+            if (liveToggle) liveToggle.checked = false;
             clearCountdownTimers();
-        } else if (isLiveEnabled) {
+        } else if (state.isLiveIncrement) {
+            timerCompleted = false;
+            completedElapsedSec = 0;
             timerStartTime = Date.now();
             targetTimestamp = new Date(Date.now() + remSec * 1000);
             startCountdown();
             updateStopTimeDisplay();
             fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&action=clear`, { method: 'POST' }).catch(() => {});
+        } else {
+            clearCountdownTimers();
         }
 
         // Update UI displays
@@ -3064,14 +3157,31 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
             baseTotalTrackedSec = Math.max(totalTrackedSec, dbLogged);
             totalTrackedSec = baseTotalTrackedSec;
 
+            const isRemoteRunning = catchUp.isRemoteRunning;
+            state.isLiveIncrement = isRemoteRunning;
+            const liveToggle = document.getElementById('liveIncrementToggle') || 
+                               document.getElementById('liveIncrementSwitch');
+            if (liveToggle) {
+                liveToggle.checked = isRemoteRunning;
+            }
+            try {
+                localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, String(isRemoteRunning));
+            } catch (e) { }
+
             if (dbLogged >= TARGET_DAILY_SEC || remSec <= 0) {
                 timerCompleted = true;
                 completedElapsedSec = 0;
+                state.isLiveIncrement = false;
+                if (liveToggle) liveToggle.checked = false;
                 clearCountdownTimers();
-            } else if (state.isLiveIncrement && catchUp.isRemoteRunning) {
+            } else if (state.isLiveIncrement) {
+                timerCompleted = false;
+                completedElapsedSec = 0;
                 timerStartTime = Date.now();
                 targetTimestamp = new Date(Date.now() + remSec * 1000);
                 startCountdown();
+            } else {
+                clearCountdownTimers();
             }
 
             // Update local cache to match the verified remote state
@@ -3509,6 +3619,170 @@ if (pinModal) {
     pinModal.addEventListener('click', (e) => { if (e.target === pinModal) closePinModal(); });
 }
 
+// ===== Tab Navigation & Settings Management =====
+function switchTab(tabName) {
+    document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+
+    const targetTab = document.getElementById(tabName + 'Tab');
+    const targetBtn = document.getElementById(tabName + 'TabBtn');
+    if (targetTab) targetTab.classList.remove('hidden');
+    if (targetBtn) targetBtn.classList.add('active');
+}
+window.switchTab = switchTab;
+
+function initTabsAndSettings() {
+    // 1. Tab switching buttons
+    const timerTabBtn = document.getElementById('timerTabBtn');
+    const instructionsTabBtn = document.getElementById('instructionsTabBtn');
+    if (timerTabBtn) timerTabBtn.addEventListener('click', () => switchTab('timer'));
+    if (instructionsTabBtn) instructionsTabBtn.addEventListener('click', () => switchTab('instructions'));
+
+    // 2. Bookmarklet copy button
+    const copyBookmarkletBtn = document.getElementById('copyBookmarkletCodeBtn');
+    const copyBookmarkletBtnText = document.getElementById('copyBookmarkletBtnText');
+    if (copyBookmarkletBtn) {
+        copyBookmarkletBtn.addEventListener('click', async () => {
+            const bookmarkletCode = "javascript:(function(){if(window._sbSyncBridgeRunning){alert('Sync Bridge is already running.');return;}let p=localStorage.getItem('snip8_bridge_pin')||localStorage.getItem('snip8_user_pin');if(!p){p=prompt('Enter your 6-digit snip8 PIN:');if(!p)return;localStorage.setItem('snip8_bridge_pin',p.trim());}window._sbSyncBridgeRunning=true;const t=document.createElement('div');t.innerText='Sync Bridge Connected (PIN: '+p+')';t.style.cssText='position:fixed;bottom:16px;right:16px;background:#10b981;color:#fff;padding:8px 14px;border-radius:6px;font-size:12px;z-index:999999;box-shadow:0 4px 6px rgba(0,0,0,0.15);font-family:sans-serif;pointer-events:none;transition:opacity 0.5s ease;';document.body.appendChild(t);setTimeout(()=>{t.style.opacity='0';setTimeout(()=>t.remove(),500);},3000);setInterval(async()=>{try{const r=await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p));if(!r.ok)return;const d=await r.json();if(d&&d.stop_requested){const b=Array.from(document.querySelectorAll('button')).find(x=>x.textContent.trim().toLowerCase().includes('stop timer'));if(b){b.click();}await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p)+'&action=clear',{method:'POST'});}}catch(e){}},10000);})();";
+            try {
+                await navigator.clipboard.writeText(bookmarkletCode);
+                if (copyBookmarkletBtnText) {
+                    const originalText = copyBookmarkletBtnText.textContent;
+                    copyBookmarkletBtnText.textContent = '✓ Copied to Clipboard!';
+                    setTimeout(() => {
+                        copyBookmarkletBtnText.textContent = originalText;
+                    }, 2500);
+                }
+            } catch (err) {
+                prompt('Copy bookmarklet code below:', bookmarkletCode);
+            }
+        });
+    }
+
+    // 3. Settings Modal
+    const settingsModal = document.getElementById('settingsModal');
+    const settingsModalBtn = document.getElementById('settingsModalBtn');
+    const settingsModalClose = document.getElementById('settingsModalClose');
+    const settingsPinInput = document.getElementById('settingsPinInput');
+    const saveSettingsPinBtn = document.getElementById('saveSettingsPinBtn');
+    const settingsPinVal = document.getElementById('settingsPinVal');
+    const settingsStatusDot = document.getElementById('settingsStatusDot');
+    const settingsStatusText = document.getElementById('settingsStatusText');
+    const settingsLastPing = document.getElementById('settingsLastPing');
+    const settingsResetTimerBtn = document.getElementById('settingsResetTimerBtn');
+    const settingsClearSessionBtn = document.getElementById('settingsClearSessionBtn');
+    const dailyCapHoursInput = document.getElementById('dailyCapHoursInput');
+
+    function updateSettingsModalUI() {
+        const pin = getUserPin() || (localStorage.getItem('snip8_bridge_pin') || '').trim();
+        if (settingsPinVal) {
+            settingsPinVal.textContent = pin ? maskPin(pin) + ` (${pin})` : 'None';
+        }
+        if (settingsPinInput && pin) {
+            settingsPinInput.value = pin;
+        }
+
+        const capSec = state.dailyCapSeconds || TARGET_DAILY_SEC;
+        if (dailyCapHoursInput) {
+            dailyCapHoursInput.value = (capSec / 3600).toFixed(1);
+        }
+
+        const badgeLabel = document.getElementById('neonSyncLabel');
+        const badgeText = badgeLabel ? badgeLabel.textContent : 'Neon Ready';
+        if (settingsStatusText) {
+            settingsStatusText.textContent = badgeText;
+        }
+        if (settingsLastPing) {
+            settingsLastPing.textContent = 'PIN: ' + (pin ? maskPin(pin) : 'Not configured');
+        }
+    }
+
+    if (settingsModalBtn) {
+        settingsModalBtn.addEventListener('click', () => {
+            updateSettingsModalUI();
+            if (settingsModal) {
+                if (typeof settingsModal.showModal === 'function') {
+                    if (!settingsModal.open) settingsModal.showModal();
+                } else {
+                    settingsModal.setAttribute('open', '');
+                }
+            }
+        });
+    }
+
+    if (settingsModalClose) {
+        settingsModalClose.addEventListener('click', () => {
+            if (settingsModal) {
+                if (typeof settingsModal.close === 'function') settingsModal.close();
+                else settingsModal.removeAttribute('open');
+            }
+        });
+    }
+
+    if (settingsModal) {
+        settingsModal.addEventListener('click', (e) => {
+            if (e.target === settingsModal) {
+                if (typeof settingsModal.close === 'function') settingsModal.close();
+                else settingsModal.removeAttribute('open');
+            }
+        });
+    }
+
+    if (saveSettingsPinBtn && settingsPinInput) {
+        saveSettingsPinBtn.addEventListener('click', () => {
+            const entered = (settingsPinInput.value || '').trim();
+            if (!/^\d{4,8}$/.test(entered)) {
+                alert('Please enter a 4–8 digit numeric PIN.');
+                return;
+            }
+            try {
+                localStorage.setItem(STORAGE_KEY_PIN, entered);
+                localStorage.setItem('snip8_bridge_pin', entered);
+            } catch (e) { }
+            state.userPin = entered;
+            updatePinUI();
+            updateSettingsModalUI();
+            saveSettingsPinBtn.textContent = '✓ Saved!';
+            setTimeout(() => {
+                saveSettingsPinBtn.textContent = 'Save PIN';
+            }, 1500);
+            if (navigator.onLine) {
+                revalidateNeonSession(entered, state.workDate || getWorkDate());
+            }
+        });
+    }
+
+    if (dailyCapHoursInput) {
+        dailyCapHoursInput.addEventListener('change', () => {
+            const h = parseFloat(dailyCapHoursInput.value);
+            if (h && h > 0 && h <= 24) {
+                const newCapSec = Math.round(h * 3600);
+                state.dailyCapSeconds = newCapSec;
+                state.remainingSeconds = Math.max(0, newCapSec - (state.loggedSeconds || baseTodaySec || 0));
+                updateLoggedDisplays();
+                updateStopTimeDisplay();
+                debouncedSaveSession();
+            }
+        });
+    }
+
+    if (settingsResetTimerBtn) {
+        settingsResetTimerBtn.addEventListener('click', () => {
+            const mainReset = document.getElementById('resetBtn');
+            if (mainReset) mainReset.click();
+            if (settingsModal && typeof settingsModal.close === 'function') settingsModal.close();
+        });
+    }
+
+    if (settingsClearSessionBtn) {
+        settingsClearSessionBtn.addEventListener('click', () => {
+            const mainClear = document.getElementById('clearSessionBtn');
+            if (mainClear) mainClear.click();
+            if (settingsModal && typeof settingsModal.close === 'function') settingsModal.close();
+        });
+    }
+}
+
 // Offline Mutation Queue: Automatic flush when network connectivity resumes
 window.addEventListener('online', async () => {
     updateNeonBadge('syncing', 'Back online...');
@@ -3535,6 +3809,7 @@ async function initApp() {
     initLiveIncrementToggle();
     initCrossDeviceSyncListener();
     initImagePreviewCard();
+    initTabsAndSettings();
     updatePinUI();
 
     // Compute today's date in local time:

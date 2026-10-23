@@ -62,14 +62,29 @@
         .alarm-ring { animation: alarmRing 1.2s ease-in-out infinite; }
         @media (prefers-reduced-motion: reduce) { .alarm-ring { animation: none; } }
 
-        /* Modals (Sync to mobile & PIN authentication) */
-        #syncModal::backdrop, #pinModal::backdrop { background: rgba(2, 6, 23, 0.85); backdrop-filter: blur(4px); }
+        /* Modals (Sync to mobile, PIN authentication, Settings) */
+        #syncModal::backdrop, #pinModal::backdrop, #settingsModal::backdrop { background: rgba(2, 6, 23, 0.85); backdrop-filter: blur(4px); }
         @keyframes syncPop {
             from { opacity: 0; transform: translateY(8px) scale(0.97); }
             to { opacity: 1; transform: translateY(0) scale(1); }
         }
-        #syncModal[open], #pinModal[open] { animation: syncPop 0.18s ease-out; }
-        @media (prefers-reduced-motion: reduce) { #syncModal[open], #pinModal[open] { animation: none; } }
+        #syncModal[open], #pinModal[open], #settingsModal[open] { animation: syncPop 0.18s ease-out; }
+        @media (prefers-reduced-motion: reduce) { #syncModal[open], #pinModal[open], #settingsModal[open] { animation: none; } }
+
+        /* Navigation Tab Styles */
+        .tab-btn {
+            color: #94a3b8;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s ease;
+        }
+        .tab-btn:hover {
+            color: #e2e8f0;
+        }
+        .tab-btn.active {
+            color: #10b981;
+            border-bottom-color: #10b981;
+            background: rgba(16, 185, 129, 0.08);
+        }
     </style>
 </head>
 
@@ -127,6 +142,29 @@
             </div>
         </header>
 
+        <!-- Navigation Tabs Bar -->
+        <nav class="flex items-center justify-between border-b border-slate-800 px-2 bg-slate-900/40 rounded-xl" aria-label="Main Navigation">
+            <div class="flex items-center gap-2">
+                <button id="timerTabBtn" type="button" data-tab="timer"
+                    class="tab-btn active px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-lg flex items-center gap-2">
+                    <span>⏱️</span>
+                    <span>Timer</span>
+                </button>
+                <button id="instructionsTabBtn" type="button" data-tab="instructions"
+                    class="tab-btn px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-lg flex items-center gap-2">
+                    <span>📖</span>
+                    <span>Instructions</span>
+                </button>
+            </div>
+            <div>
+                <button id="settingsModalBtn" type="button" title="Settings & Session Management"
+                    class="px-3 py-1.5 text-slate-400 hover:text-white bg-slate-800/80 hover:bg-slate-700 border border-slate-700/60 rounded-lg text-xs font-medium transition flex items-center gap-1.5 shadow-sm">
+                    <span>⚙️</span>
+                    <span class="hidden sm:inline">Settings</span>
+                </button>
+            </div>
+        </nav>
+
         <!-- Loud Alarm Banner (sticky; click anywhere on it or press Esc to silence) -->
         <div id="alarmBanner" role="alertdialog" aria-live="assertive" aria-labelledby="alarmTitle"
             aria-describedby="alarmDesc" title="Click anywhere or press Esc to dismiss"
@@ -150,6 +188,8 @@
             </button>
         </div>
 
+        <!-- TAB 1: TIMER (Default Active View) -->
+        <main id="timerTab" class="tab-content space-y-5">
         <!-- Screenshot Drop / Paste Zone -->
         <section id="dropZone"
             class="border-2 border-dashed border-slate-800 hover:border-emerald-500 bg-slate-900/50 hover:bg-slate-900/80 rounded-2xl p-8 text-center cursor-pointer transition flex flex-col items-center justify-center gap-2.5 shadow-lg group">
@@ -282,6 +322,22 @@
                 <div class="text-xs uppercase tracking-wider text-slate-400 font-bold">Live Remaining Countdown to Stop
                     Timer</div>
                 <div id="countdown" class="text-5xl sm:text-7xl font-mono font-black text-white tracking-tight">00:00:00
+                </div>
+
+                <!-- Dynamic 8-Hour Daily Progress Bar with Policy Thresholds -->
+                <div class="w-full mt-4 mb-2 max-w-xl mx-auto">
+                    <div class="flex justify-between text-xs text-slate-400 mb-1 font-mono">
+                        <span id="progressBarLabel">Progress: 0h 00m / 8h 00m</span>
+                        <span id="progressBarPercent">0%</span>
+                    </div>
+                    <div class="w-full bg-slate-800 rounded-full h-3.5 overflow-hidden p-0.5 border border-slate-700/60 relative">
+                        <!-- Visual tick mark at 7h 55m (98.96%) and 8h 00m (100%) -->
+                        <div class="absolute top-0 bottom-0 left-[98.96%] w-[1px] bg-amber-400/40 z-10" title="7h 55m Grace Window Start"></div>
+                        <div id="shiftProgressBar" class="h-full rounded-full transition-all duration-500 ease-out bg-emerald-500" style="width: 0%;"></div>
+                    </div>
+                    <div id="progressStatusText" class="text-center text-xs mt-1.5 font-medium text-slate-400">
+                        Shift in progress
+                    </div>
                 </div>
 
                 <!-- Controls -->
@@ -434,8 +490,188 @@
                 (No image scanned yet)
             </div>
         </details>
+        </main>
+
+        <!-- TAB 2: INSTRUCTIONS (User Guide & Workflow) -->
+        <section id="instructionsTab" class="tab-content hidden space-y-6">
+            <!-- Header Banner -->
+            <div class="bg-gradient-to-r from-slate-900 to-slate-900/80 border border-slate-800 p-6 rounded-2xl shadow-xl">
+                <div class="flex items-center gap-3">
+                    <span class="text-3xl">📖</span>
+                    <div>
+                        <h2 class="text-lg font-bold text-white tracking-tight">snip8 Workflow &amp; User Guide</h2>
+                        <p class="text-xs text-slate-400 mt-0.5">Step-by-step instructions for desktop sync bridge, live tracking, mobile stop, and compliance.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step Cards Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <!-- Step 1 -->
+                <div class="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl shadow-lg flex flex-col justify-between space-y-4">
+                    <div class="space-y-3">
+                        <div class="flex items-center gap-2.5">
+                            <span class="w-7 h-7 rounded-lg bg-emerald-950/80 border border-emerald-500/30 text-emerald-400 flex items-center justify-center font-bold text-xs">1</span>
+                            <h3 class="text-sm font-bold text-white">Setup Desktop Sync Bridge</h3>
+                        </div>
+                        <p class="text-xs text-slate-300 leading-relaxed">
+                            Create a browser bookmark named <strong class="text-emerald-400">Sync Bridge</strong> in Chrome or Edge, and paste the bookmarklet URL below.
+                        </p>
+                        <div class="bg-slate-950/80 p-3 rounded-xl border border-slate-800 text-[11px] text-slate-400 space-y-1.5">
+                            <div>• Zero extensions or permissions required.</div>
+                            <div>• Injects a temporary green badge (<span class="text-emerald-400">Sync Bridge Connected</span>).</div>
+                            <div>• Runs ambiently every 10s to capture remote stop requests.</div>
+                        </div>
+                    </div>
+                    <div>
+                        <button id="copyBookmarkletCodeBtn" type="button"
+                            class="w-full py-2 px-3 bg-emerald-600/90 hover:bg-emerald-600 active:scale-95 text-white font-medium text-xs rounded-xl transition flex items-center justify-center gap-2 shadow-md shadow-emerald-950">
+                            <span>📋</span>
+                            <span id="copyBookmarkletBtnText">Copy Bookmarklet Code</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Step 2 -->
+                <div class="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl shadow-lg space-y-3">
+                    <div class="flex items-center gap-2.5">
+                        <span class="w-7 h-7 rounded-lg bg-emerald-950/80 border border-emerald-500/30 text-emerald-400 flex items-center justify-center font-bold text-xs">2</span>
+                        <h3 class="text-sm font-bold text-white">Starting a Work Session</h3>
+                    </div>
+                    <ul class="text-xs text-slate-300 space-y-2 leading-relaxed">
+                        <li class="flex items-start gap-2">
+                            <span class="text-emerald-400 font-bold">a.</span>
+                            <span>Start your timer in Springboard at your shift beginning.</span>
+                        </li>
+                        <li class="flex items-start gap-2">
+                            <span class="text-emerald-400 font-bold">b.</span>
+                            <span>Click the <strong class="text-emerald-400">Sync Bridge</strong> bookmark once in the active Springboard tab.</span>
+                        </li>
+                        <li class="flex items-start gap-2">
+                            <span class="text-emerald-400 font-bold">c.</span>
+                            <span>Capture your timesheet crop (<kbd class="px-1.5 py-0.5 bg-slate-800 border border-slate-700 rounded text-[10px] font-mono text-emerald-400">Win + Shift + S</kbd>) and paste into snip8.</span>
+                        </li>
+                        <li class="flex items-start gap-2">
+                            <span class="text-emerald-400 font-bold">d.</span>
+                            <span>Ensure <strong class="text-emerald-400">Live Increment</strong> is toggled ON to tick upward in sync.</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Step 3 -->
+                <div class="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl shadow-lg space-y-3">
+                    <div class="flex items-center gap-2.5">
+                        <span class="w-7 h-7 rounded-lg bg-emerald-950/80 border border-emerald-500/30 text-emerald-400 flex items-center justify-center font-bold text-xs">3</span>
+                        <h3 class="text-sm font-bold text-white">Tracking &amp; Remote Stop</h3>
+                    </div>
+                    <ul class="text-xs text-slate-300 space-y-2 leading-relaxed">
+                        <li class="flex items-start gap-2">
+                            <span class="text-emerald-400 font-bold">•</span>
+                            <span>Open <strong>snip8</strong> on mobile using your same session PIN.</span>
+                        </li>
+                        <li class="flex items-start gap-2">
+                            <span class="text-emerald-400 font-bold">•</span>
+                            <span>Tap <strong class="text-white">🔄 Sync</strong> to pull cloud progress; wall-clock drift is reconciled automatically.</span>
+                        </li>
+                        <li class="flex items-start gap-2">
+                            <span class="text-rose-400 font-bold">•</span>
+                            <span>Tap <strong class="text-rose-400">⏹️ Stop Springboard</strong> from anywhere. Your desktop Springboard timer halts automatically within 10s.</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Step 4 -->
+                <div class="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl shadow-lg space-y-3">
+                    <div class="flex items-center gap-2.5">
+                        <span class="w-7 h-7 rounded-lg bg-amber-950/80 border border-amber-500/30 text-amber-400 flex items-center justify-center font-bold text-xs">4</span>
+                        <h3 class="text-sm font-bold text-white">Policy &amp; Compliance Rules</h3>
+                    </div>
+                    <div class="space-y-2 text-xs">
+                        <div class="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-emerald-300">
+                            <strong>Target: 8h 00m (28,800s)</strong> — The optimal stop point for all shifts.
+                        </div>
+                        <div class="p-2.5 rounded-lg bg-amber-950/40 border border-amber-500/30 text-amber-300">
+                            <strong>5-Minute Grace Window (8h 00m – 8h 05m):</strong> Permitted without disciplinary breach, but extra minutes are unpaid.
+                        </div>
+                        <div class="p-2.5 rounded-lg bg-rose-950/40 border border-rose-500/30 text-rose-300">
+                            <strong>&gt; 8h 05m Overtime:</strong> Formal policy violation. Stop timer immediately.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
 
     </div>
+
+    <!-- Settings & Session Management Modal -->
+    <dialog id="settingsModal" aria-labelledby="settingsModalTitle"
+        class="m-auto p-0 w-[calc(100%-2rem)] max-w-md bg-transparent text-slate-100">
+        <div class="bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl shadow-emerald-500/10 space-y-5">
+            <div class="flex items-start justify-between gap-3 pb-3 border-b border-slate-800">
+                <div class="flex items-center gap-2.5">
+                    <span class="text-2xl">⚙️</span>
+                    <div>
+                        <h2 id="settingsModalTitle" class="text-base font-bold text-white tracking-tight">snip8 Settings</h2>
+                        <p class="text-[11px] text-slate-400">Configure bridge credentials, daily cap, and session state.</p>
+                    </div>
+                </div>
+                <button id="settingsModalClose" type="button" aria-label="Close Settings"
+                    class="shrink-0 w-7 h-7 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm transition">✕</button>
+            </div>
+
+            <!-- PIN Configuration -->
+            <div class="space-y-2">
+                <label for="settingsPinInput" class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Sync Bridge PIN</label>
+                <div class="flex gap-2">
+                    <input type="text" id="settingsPinInput" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8"
+                        placeholder="e.g. 123456"
+                        class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm font-mono tracking-widest text-emerald-400 focus:outline-none focus:border-emerald-500">
+                    <button id="saveSettingsPinBtn" type="button"
+                        class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-medium text-xs rounded-xl transition">
+                        Save PIN
+                    </button>
+                </div>
+                <p id="settingsPinStatus" class="text-[11px] text-slate-500 font-mono">Current PIN: <span id="settingsPinVal" class="text-slate-300">None</span></p>
+            </div>
+
+            <!-- Workday Target Hours -->
+            <div class="space-y-2 pt-2 border-t border-slate-800">
+                <label for="dailyCapHoursInput" class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Workday Target (Hours)</label>
+                <div class="flex items-center gap-3">
+                    <input type="number" id="dailyCapHoursInput" min="1" max="12" step="0.5" value="8"
+                        class="w-24 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm font-mono text-center text-white focus:outline-none focus:border-emerald-500">
+                    <span class="text-xs text-slate-400">hours (Default: 8.0h / 28,800s)</span>
+                </div>
+            </div>
+
+            <!-- Connection & Health Status -->
+            <div class="space-y-2 pt-2 border-t border-slate-800">
+                <span class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Neon Cloud Status</span>
+                <div class="bg-slate-950/70 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                    <div class="flex items-center gap-2">
+                        <span id="settingsStatusDot" class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                        <span id="settingsStatusText" class="text-slate-300 font-mono">Neon Connected</span>
+                    </div>
+                    <span id="settingsLastPing" class="text-[10px] text-slate-500 font-mono">Last ping: Just now</span>
+                </div>
+            </div>
+
+            <!-- Session Actions -->
+            <div class="space-y-2 pt-2 border-t border-slate-800">
+                <span class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Session Controls</span>
+                <div class="grid grid-cols-2 gap-2">
+                    <button id="settingsResetTimerBtn" type="button"
+                        class="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-medium transition flex items-center justify-center gap-1.5">
+                        <span>⏹</span> Reset Timer
+                    </button>
+                    <button id="settingsClearSessionBtn" type="button"
+                        class="py-2.5 px-3 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/60 rounded-xl text-xs font-medium transition flex items-center justify-center gap-1.5">
+                        <span>🗑</span> Clear Session
+                    </button>
+                </div>
+            </div>
+        </div>
+    </dialog>
 
     <!-- PIN Authentication Modal -->
     <dialog id="pinModal" aria-labelledby="pinModalTitle"
