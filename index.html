@@ -73,17 +73,8 @@
 
         /* Navigation Tab Styles */
         .tab-btn {
-            color: #94a3b8;
             border-bottom: 2px solid transparent;
             transition: all 0.2s ease;
-        }
-        .tab-btn:hover {
-            color: #e2e8f0;
-        }
-        .tab-btn.active {
-            color: #10b981;
-            border-bottom-color: #10b981;
-            background: rgba(16, 185, 129, 0.08);
         }
     </style>
 </head>
@@ -143,7 +134,7 @@
         </header>
 
         <!-- Navigation Tabs Bar -->
-        <nav class="flex items-center justify-between border-b border-slate-800 px-2 bg-slate-900/40 rounded-xl" aria-label="Main Navigation">
+        <nav id="mainNavTabs" class="flex items-center justify-between border-b border-slate-800 px-2 bg-slate-900/40 rounded-xl transition" aria-label="Main Navigation">
             <div class="flex items-center gap-2">
                 <button id="timerTabBtn" type="button" data-tab="timer"
                     class="tab-btn active px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-lg flex items-center gap-2">
@@ -606,7 +597,7 @@
     <!-- Settings & Session Management Modal -->
     <dialog id="settingsModal" aria-labelledby="settingsModalTitle"
         class="m-auto p-0 w-[calc(100%-2rem)] max-w-md bg-transparent text-slate-100">
-        <div class="bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl shadow-emerald-500/10 space-y-5">
+        <div id="settingsModalBox" class="bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl shadow-emerald-500/10 space-y-5">
             <div class="flex items-start justify-between gap-3 pb-3 border-b border-slate-800">
                 <div class="flex items-center gap-2.5">
                     <span class="text-2xl">⚙️</span>
@@ -621,17 +612,32 @@
 
             <!-- PIN Configuration -->
             <div class="space-y-2">
-                <label for="settingsPinInput" class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Sync Bridge PIN</label>
+                <label for="bridgePinInput" class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Sync Bridge PIN</label>
                 <div class="flex gap-2">
-                    <input type="text" id="settingsPinInput" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8"
-                        placeholder="e.g. 123456"
-                        class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-sm font-mono tracking-widest text-emerald-400 focus:outline-none focus:border-emerald-500">
+                    <div class="relative flex-1 flex items-center">
+                        <input 
+                            type="password" 
+                            id="bridgePinInput" 
+                            maxlength="10" 
+                            inputmode="numeric"
+                            placeholder="Enter 4–8 digit PIN"
+                            class="w-full pr-10 px-3 py-2 border rounded-xl font-mono text-sm tracking-widest bg-slate-950 text-emerald-400 border-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500" 
+                        />
+                        <button 
+                            type="button" 
+                            id="togglePinVisibilityBtn" 
+                            class="absolute right-2 text-slate-400 hover:text-slate-200 p-1 transition"
+                            title="Toggle PIN Visibility"
+                        >
+                            👁️
+                        </button>
+                    </div>
                     <button id="saveSettingsPinBtn" type="button"
                         class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-medium text-xs rounded-xl transition">
                         Save PIN
                     </button>
                 </div>
-                <p id="settingsPinStatus" class="text-[11px] text-slate-500 font-mono">Current PIN: <span id="settingsPinVal" class="text-slate-300">None</span></p>
+                <p id="settingsPinStatus" class="text-[11px] text-slate-500 font-mono">Current PIN: <span id="currentPinDisplay" class="text-slate-300">None</span></p>
             </div>
 
             <!-- Workday Target Hours -->
@@ -647,12 +653,12 @@
             <!-- Connection & Health Status -->
             <div class="space-y-2 pt-2 border-t border-slate-800">
                 <span class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Neon Cloud Status</span>
-                <div class="bg-slate-950/70 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
+                <div id="neonStatusBox" class="bg-slate-950/70 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
                     <div class="flex items-center gap-2">
                         <span id="settingsStatusDot" class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
                         <span id="settingsStatusText" class="text-slate-300 font-mono">Neon Connected</span>
                     </div>
-                    <span id="settingsLastPing" class="text-[10px] text-slate-500 font-mono">Last ping: Just now</span>
+                    <span id="settingsLastPing" class="text-[10px] text-slate-500 font-mono">PIN: ••••••</span>
                 </div>
             </div>
 

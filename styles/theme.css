@@ -267,3 +267,126 @@ html, body {
     background-color: #059669;
     border-color: rgba(16, 185, 129, 0.5);
 }
+
+/* Tab Navigation System — Adaptive Styling */
+[data-theme='light'] #mainNavTabs {
+    background-color: #f1f5f9 !important;
+    border-color: #e2e8f0 !important;
+}
+
+[data-theme='dark'] #mainNavTabs {
+    background-color: #1e293b !important;
+    border-color: #334155 !important;
+}
+
+.tab-btn {
+    transition: all 0.2s ease;
+}
+
+[data-theme='light'] .tab-btn {
+    color: #475569 !important;
+}
+
+[data-theme='light'] .tab-btn:hover {
+    color: #0f172a !important;
+    background-color: rgba(226, 232, 240, 0.6) !important;
+}
+
+[data-theme='light'] .tab-btn.active {
+    background-color: #ffffff !important;
+    color: #059669 !important;
+    border-color: #cbd5e1 !important;
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1) !important;
+}
+
+[data-theme='dark'] .tab-btn {
+    color: #94a3b8 !important;
+}
+
+[data-theme='dark'] .tab-btn:hover {
+    color: #f8fafc !important;
+    background-color: #334155 !important;
+}
+
+[data-theme='dark'] .tab-btn.active {
+    background-color: #334155 !important;
+    color: #34d399 !important;
+    border-color: transparent !important;
+}
+
+/* Settings Button Adaptive Styling */
+[data-theme='light'] #settingsModalBtn {
+    background-color: #ffffff !important;
+    color: #334155 !important;
+    border-color: #e2e8f0 !important;
+}
+
+[data-theme='light'] #settingsModalBtn:hover {
+    background-color: #f8fafc !important;
+    color: #0f172a !important;
+}
+
+[data-theme='dark'] #settingsModalBtn {
+    background-color: #1e293b !important;
+    color: #cbd5e1 !important;
+    border-color: #334155 !important;
+}
+
+[data-theme='dark'] #settingsModalBtn:hover {
+    background-color: #334155 !important;
+    color: #ffffff !important;
+}
+
+/* Settings Modal Content Adaptive Contrast */
+[data-theme='light'] #settingsModal .bg-slate-900 {
+    background-color: #ffffff !important;
+    border-color: #e2e8f0 !important;
+    color: #0f172a !important;
+}
+
+[data-theme='light'] #settingsModalBox {
+    background-color: #ffffff !important;
+    border-color: #e2e8f0 !important;
+}
+
+[data-theme='light'] #neonStatusBox {
+    background-color: #f8fafc !important;
+    border-color: #e2e8f0 !important;
+    color: #334155 !important;
+}
+
+[data-theme='light'] #settingsStatusText {
+    color: #1e293b !important;
+}
+
+[data-theme='light'] #settingsLastPing {
+    color: #64748b !important;
+}
+
+[data-theme='light'] #settingsClearSessionBtn {
+    background-color: #fff1f2 !important;
+    color: #be123c !important;
+    border-color: #fecdd3 !important;
+}
+
+[data-theme='light'] #settingsClearSessionBtn:hover {
+    background-color: #ffe4e6 !important;
+}
+
+[data-theme='light'] #settingsResetTimerBtn {
+    background-color: #f1f5f9 !important;
+    color: #1e293b !important;
+    border-color: #e2e8f0 !important;
+}
+
+[data-theme='light'] #settingsResetTimerBtn:hover {
+    background-color: #e2e8f0 !important;
+}
+
+[data-theme='light'] #bridgePinInput,
+[data-theme='light'] #dailyCapHoursInput {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+    border-color: #cbd5e1 !important;
+}
+

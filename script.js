@@ -3663,9 +3663,10 @@ function initTabsAndSettings() {
     const settingsModal = document.getElementById('settingsModal');
     const settingsModalBtn = document.getElementById('settingsModalBtn');
     const settingsModalClose = document.getElementById('settingsModalClose');
-    const settingsPinInput = document.getElementById('settingsPinInput');
+    const bridgePinInput = document.getElementById('bridgePinInput') || document.getElementById('settingsPinInput');
+    const togglePinVisibilityBtn = document.getElementById('togglePinVisibilityBtn');
     const saveSettingsPinBtn = document.getElementById('saveSettingsPinBtn');
-    const settingsPinVal = document.getElementById('settingsPinVal');
+    const currentPinDisplay = document.getElementById('currentPinDisplay') || document.getElementById('settingsPinVal');
     const settingsStatusDot = document.getElementById('settingsStatusDot');
     const settingsStatusText = document.getElementById('settingsStatusText');
     const settingsLastPing = document.getElementById('settingsLastPing');
@@ -3673,13 +3674,21 @@ function initTabsAndSettings() {
     const settingsClearSessionBtn = document.getElementById('settingsClearSessionBtn');
     const dailyCapHoursInput = document.getElementById('dailyCapHoursInput');
 
+    if (togglePinVisibilityBtn && bridgePinInput) {
+        togglePinVisibilityBtn.addEventListener('click', () => {
+            const isPassword = bridgePinInput.type === 'password';
+            bridgePinInput.type = isPassword ? 'text' : 'password';
+            togglePinVisibilityBtn.textContent = isPassword ? '🙈' : '👁️';
+        });
+    }
+
     function updateSettingsModalUI() {
         const pin = getUserPin() || (localStorage.getItem('snip8_bridge_pin') || '').trim();
-        if (settingsPinVal) {
-            settingsPinVal.textContent = pin ? maskPin(pin) + ` (${pin})` : 'None';
+        if (currentPinDisplay) {
+            currentPinDisplay.textContent = pin ? maskPin(pin) : 'None';
         }
-        if (settingsPinInput && pin) {
-            settingsPinInput.value = pin;
+        if (bridgePinInput && pin) {
+            bridgePinInput.value = pin;
         }
 
         const capSec = state.dailyCapSeconds || TARGET_DAILY_SEC;
@@ -3728,9 +3737,9 @@ function initTabsAndSettings() {
         });
     }
 
-    if (saveSettingsPinBtn && settingsPinInput) {
+    if (saveSettingsPinBtn && bridgePinInput) {
         saveSettingsPinBtn.addEventListener('click', () => {
-            const entered = (settingsPinInput.value || '').trim();
+            const entered = (bridgePinInput.value || '').trim();
             if (!/^\d{4,8}$/.test(entered)) {
                 alert('Please enter a 4–8 digit numeric PIN.');
                 return;
