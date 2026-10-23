@@ -7,6 +7,7 @@ import sessionHandler from './api/snip8-session.js';
 import validateHandler from './api/validate-timesheet.js';
 import uploadScreenshotHandler from './api/upload-screenshot.js';
 import stopClockifyHandler from './api/stop-clockify.js';
+import timerSignalHandler from './api/timer-signal.js';
 import { initDb } from './db/neon.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -43,6 +44,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/stop-clockify') {
         return stopClockifyHandler(req, res);
+    }
+    if (pathname === '/api/timer-signal') {
+        return timerSignalHandler(req, res);
     }
 
     // Static File Serving

@@ -21,7 +21,7 @@
         let detectedDays = [];
         let selectedDayIndex = 0;
         let totalTrackedSec = 0;
-        let clockifyAutoStopped = false;
+        let springboardAutoStopped = false;
 
         // Master application state for sync & AI validation
         const state = {
@@ -1530,9 +1530,9 @@
                     dispTodayLogged.textContent = formatHms(state.loggedSeconds || baseTodaySec);
                     dispTotalTracked.textContent = formatHms(state.loggedSeconds || totalTrackedSec);
                     if (!alarmDismissed) triggerAlarm();
-                    if (!clockifyAutoStopped) {
-                        clockifyAutoStopped = true;
-                        stopClockifyTimer();
+                    if (!springboardAutoStopped) {
+                        springboardAutoStopped = true;
+                        requestSpringboardStop();
                     }
                 }
                 return;
@@ -1554,9 +1554,9 @@
                 updateLoggedDisplays();
                 debouncedSaveSession();
                 if (!alarmDismissed) triggerAlarm();
-                if (!clockifyAutoStopped) {
-                    clockifyAutoStopped = true;
-                    stopClockifyTimer();
+                if (!springboardAutoStopped) {
+                    springboardAutoStopped = true;
+                    requestSpringboardStop();
                 }
                 return;
             }
@@ -1836,41 +1836,42 @@
         alarmBanner.addEventListener('click', stopAlarm);
         window.addEventListener('keydown', (e) => { if (e.key === 'Escape') stopAlarm(); });
 
-        // Helper to stop Clockify running timer
-        async function stopClockifyTimer() {
-            const btn = document.getElementById('btnStopClockify');
+        // Helper to dispatch remote stop signal to Springboard bridge
+        async function requestSpringboardStop() {
+            const btn = document.getElementById('btnStopSpringboard');
             if (btn) {
                 btn.disabled = true;
-                btn.textContent = 'Stopping...';
+                btn.textContent = 'Signaling Stop...';
             }
 
             try {
-                const res = await fetch('/api/stop-clockify', { method: 'POST' });
+                const res = await fetch(`/api/timer-signal?pin=${encodeURIComponent(state.userPin || 'default')}&action=set`, {
+                    method: 'POST'
+                });
                 const data = await res.json();
 
                 if (res.ok && data.success) {
-                    setValidationProgress(100, 'Clockify timer stopped successfully!', 'success');
-                    if (btn) btn.textContent = 'Stopped ⏹️';
-                    // Toggle off live increment since timer is stopped
+                    setValidationProgress(100, 'Stop signal dispatched! Springboard bridge is clocking out...', 'success');
+                    if (btn) btn.textContent = 'Stop Requested ⏹️';
                     const liveToggle = document.getElementById('liveIncrementToggle');
                     if (liveToggle) liveToggle.checked = false;
                     state.isLiveIncrement = false;
                 } else {
-                    throw new Error(data.error || 'Failed to stop Clockify timer');
+                    throw new Error(data.error || 'Failed to dispatch stop signal');
                 }
             } catch (err) {
-                console.error('Clockify stop failed:', err);
-                setValidationProgress(100, `Clockify Error: ${err.message}`, 'error');
-                if (btn) btn.textContent = '⏹️ Stop Clockify';
+                console.error('Remote stop failed:', err);
+                setValidationProgress(100, `Bridge Error: ${err.message}`, 'error');
+                if (btn) btn.textContent = '⏹️ Stop Springboard';
             } finally {
                 if (btn) btn.disabled = false;
             }
         }
-        window.stopClockifyTimer = stopClockifyTimer;
+        window.requestSpringboardStop = requestSpringboardStop;
 
-        const btnStopClockify = document.getElementById('btnStopClockify');
-        if (btnStopClockify) {
-            btnStopClockify.addEventListener('click', stopClockifyTimer);
+        const btnStopSpringboard = document.getElementById('btnStopSpringboard');
+        if (btnStopSpringboard) {
+            btnStopSpringboard.addEventListener('click', requestSpringboardStop);
         }
 
         document.getElementById('resetBtn').addEventListener('click', () => {
@@ -1884,11 +1885,11 @@
             countdown.classList.add('text-white');
             updateLoggedDisplays();
             debouncedSaveSession();
-            clockifyAutoStopped = false;
-            const btnClockify = document.getElementById('btnStopClockify');
-            if (btnClockify) {
-                btnClockify.textContent = '⏹️ Stop Clockify';
-                btnClockify.disabled = false;
+            springboardAutoStopped = false;
+            const btnSpringboard = document.getElementById('btnStopSpringboard');
+            if (btnSpringboard) {
+                btnSpringboard.textContent = '⏹️ Stop Springboard';
+                btnSpringboard.disabled = false;
             }
         });
 
@@ -1934,11 +1935,11 @@
             renderLatestScannedImage(null);
             clearSyncUrl();
             closeSyncModal();
-            clockifyAutoStopped = false;
-            const btnClockify = document.getElementById('btnStopClockify');
-            if (btnClockify) {
-                btnClockify.textContent = '⏹️ Stop Clockify';
-                btnClockify.disabled = false;
+            springboardAutoStopped = false;
+            const btnSpringboard = document.getElementById('btnStopSpringboard');
+            if (btnSpringboard) {
+                btnSpringboard.textContent = '⏹️ Stop Springboard';
+                btnSpringboard.disabled = false;
             }
         });
 
