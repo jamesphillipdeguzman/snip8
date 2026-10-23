@@ -60,6 +60,21 @@ export default async function handler(req, res) {
                 is_fresh_default: true
             };
 
+            let isLiveIncrement = true;
+            if (session.timesheet_data) {
+                let td = session.timesheet_data;
+                if (typeof td === 'string') {
+                    try { td = JSON.parse(td); } catch (e) { td = null; }
+                }
+                if (td && typeof td === 'object' && td.isLiveIncrement !== undefined) {
+                    isLiveIncrement = Boolean(td.isLiveIncrement);
+                }
+            }
+            if (session.is_live_increment !== undefined) {
+                isLiveIncrement = Boolean(session.is_live_increment);
+            }
+            session.isLiveIncrement = isLiveIncrement;
+
             res.statusCode = 200;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({
@@ -90,6 +105,16 @@ export default async function handler(req, res) {
                 timesheet_data: body.timesheet_data || [],
                 last_scanned_image_url: body.last_scanned_image_url || null
             });
+
+            if (session) {
+                let isLiveIncrement = true;
+                if (body.isLiveIncrement !== undefined) {
+                    isLiveIncrement = Boolean(body.isLiveIncrement);
+                } else if (body.timesheet_data && typeof body.timesheet_data === 'object' && body.timesheet_data.isLiveIncrement !== undefined) {
+                    isLiveIncrement = Boolean(body.timesheet_data.isLiveIncrement);
+                }
+                session.isLiveIncrement = isLiveIncrement;
+            }
 
             res.statusCode = 200;
             res.setHeader('Content-Type', 'application/json');

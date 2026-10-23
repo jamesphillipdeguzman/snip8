@@ -1418,6 +1418,9 @@ function initLiveIncrementToggle() {
                     startCountdown();
                     updateStopTimeDisplay();
                 }
+                if (typeof saveSessionToNeon === 'function') {
+                    saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { silent: true, isLiveIncrement: true });
+                }
             } else {
                 // Clear the interval and timestamps when switched off
                 if (countdownInterval) {
@@ -1436,6 +1439,9 @@ function initLiveIncrementToggle() {
                 timerStartTime = null;
                 targetTimestamp = null;
                 updateStopTimeDisplay();
+                if (typeof saveSessionToNeon === 'function') {
+                    saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { silent: true, isLiveIncrement: false });
+                }
             }
             updateLoggedDisplays();
         });
@@ -1558,6 +1564,13 @@ function clearCountdownTimers() {
 }
 
 function tickCountdown() {
+    if (!state.isLiveIncrement) {
+        if (countdownInterval) {
+            clearInterval(countdownInterval);
+            countdownInterval = null;
+        }
+        return;
+    }
     if (!targetTimestamp) return;
 
     // Ensure the ticker does NOT recalculate and overwrite logged_seconds if the daily cap has been reached
@@ -1621,18 +1634,30 @@ function startCountdown() {
     countdown.classList.remove('text-emerald-400');
     countdown.classList.add('text-white');
 
-    countdownInterval = setInterval(tickCountdown, 1000);
+    countdownInterval = setInterval(() => {
+        if (!state.isLiveIncrement) {
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            return;
+        }
+        tickCountdown();
+    }, 1000);
     window.liveTimerInterval = countdownInterval;
     state.tickerInterval = countdownInterval;
 
     // One-shot deadline timer: background tabs throttle repeating intervals (down to ~1/min),
     // while a single non-chained timeout is much more likely to fire on time.
     const remainingMs = targetTimestamp - Date.now();
-    if (remainingMs > 0) deadlineTimeout = setTimeout(tickCountdown, remainingMs + 50);
+    if (remainingMs > 0) deadlineTimeout = setTimeout(() => {
+        if (!state.isLiveIncrement) return;
+        tickCountdown();
+    }, remainingMs + 50);
 
     // Periodic cloud sync every 60s while timer runs
     periodicSyncInterval = setInterval(() => {
-        if (targetTimestamp && countdownInterval) {
+        if (targetTimestamp && countdownInterval && state.isLiveIncrement) {
             debouncedSaveSession();
         }
     }, 60000);
@@ -1954,7 +1979,12 @@ async function requestSpringboardStop() {
 
     // 3. Save Paused State immediately to Neon DB
     saveSession();
-    saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { silent: true });
+    if (typeof saveSessionToNeon === 'function') {
+        saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, {
+            silent: true,
+            isLiveIncrement: false
+        });
+    }
 
     // 4. Dispatch Remote Stop Signal to backend bridge
     try {
@@ -1983,35 +2013,27 @@ function initCrossDeviceSyncListener() {
     if (window.crossDeviceSyncInterval) return;
 
     window.crossDeviceSyncInterval = setInterval(async () => {
-        // Only check if local state currently thinks it's ticking
+        // Only check if local UI currently thinks it is ticking
         if (!state.isLiveIncrement) return;
 
         try {
             const pin = state.userPin || localStorage.getItem('snip8_user_pin');
             if (!pin) return;
 
-            // Check remote signal endpoint
-            const res = await fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}`);
+            // Fetch the latest session state from snip8_sessions
+            const res = await fetch(`/api/snip8-session?pin=${encodeURIComponent(pin)}`);
+            if (!res.ok) return;
             const data = await res.json();
 
-            // If remote session is marked stopped or a stop was triggered
-            if (data && data.stop_requested) {
-                console.log('[snip8] Detected remote stop trigger from another device. Pausing local timer...');
+            // If remote session is explicitly paused, halt local ticking
+            let td = data?.session?.timesheet_data;
+            if (typeof td === 'string') {
+                try { td = JSON.parse(td); } catch (e) { td = null; }
+            }
+            const remoteLive = td?.isLiveIncrement ?? data?.session?.timesheet_data?.isLiveIncrement ?? data?.session?.isLiveIncrement;
 
-                if (timerStartTime && !timerCompleted) {
-                    const elapsed = getElapsedSeconds();
-                    baseTodaySec += elapsed;
-                    baseTotalTrackedSec += elapsed;
-                    state.loggedSeconds = baseTodaySec;
-                    state.totalLoggedSeconds = baseTodaySec;
-                    state.remainingSeconds = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - baseTodaySec);
-                    if (detectedDays[selectedDayIndex]) {
-                        detectedDays[selectedDayIndex].sec = baseTodaySec;
-                        detectedDays[selectedDayIndex].h = Math.floor(baseTodaySec / 3600);
-                        detectedDays[selectedDayIndex].m = Math.floor((baseTodaySec % 3600) / 60);
-                        detectedDays[selectedDayIndex].s = baseTodaySec % 60;
-                    }
-                }
+            if (remoteLive === false) {
+                console.log('[snip8] Remote session is paused. Halting local countdown...');
 
                 if (typeof countdownInterval !== 'undefined' && countdownInterval) {
                     clearInterval(countdownInterval);
@@ -2038,6 +2060,13 @@ function initCrossDeviceSyncListener() {
                                    document.getElementById('liveIncrementSwitch');
                 if (liveToggle) liveToggle.checked = false;
 
+                if (data.session.logged_seconds !== undefined && typeof data.session.logged_seconds === 'number' && data.session.logged_seconds > 0) {
+                    baseTodaySec = Math.max(baseTodaySec, data.session.logged_seconds);
+                    state.loggedSeconds = baseTodaySec;
+                    state.totalLoggedSeconds = baseTodaySec;
+                    state.remainingSeconds = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - baseTodaySec);
+                }
+
                 updateLoggedDisplays();
                 updateStopTimeDisplay();
 
@@ -2048,12 +2077,11 @@ function initCrossDeviceSyncListener() {
                 }
 
                 saveSession();
-                saveSessionToNeon(baseTodaySec, state.remainingSeconds, detectedDays, null, { silent: true });
             }
         } catch (err) {
             console.debug('[snip8 sync error]', err);
         }
-    }, 10000);
+    }, 10000); // Check every 10 seconds
 }
 window.initCrossDeviceSyncListener = initCrossDeviceSyncListener;
 
@@ -2569,6 +2597,12 @@ async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null
         ? detectedDays[selectedDayIndex]
         : (detectedDays && detectedDays[0]);
 
+    const liveToggle = document.getElementById('liveIncrementToggle') || 
+                       document.getElementById('liveIncrementSwitch');
+    const isLiveIncrement = options.isLiveIncrement !== undefined
+        ? Boolean(options.isLiveIncrement)
+        : (liveToggle ? liveToggle.checked : (state.isLiveIncrement !== undefined ? state.isLiveIncrement : true));
+
     const cleanDayLabel = (activeDay && activeDay.label)
         ? activeDay.label.replace(/\s*\(AI\)/i, '').trim()
         : formatDayLabel(targetScanDate);
@@ -2577,7 +2611,8 @@ async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null
         dayLabel: cleanDayLabel,
         workDate: targetScanDate,
         blocks: (activeDay && activeDay.shifts) || [],
-        days: detectedDays
+        days: detectedDays,
+        isLiveIncrement: isLiveIncrement
     };
 
     const payload = {
@@ -2588,6 +2623,7 @@ async function saveSessionToNeon(overrideLoggedSec = null, overrideRemSec = null
         logged_seconds: currentTodaySec,
         timesheet_data: payloadTimesheetData,
         last_scanned_image_url: imageUrl,
+        isLiveIncrement: isLiveIncrement,
         updated_at: new Date().toISOString()
     };
 
