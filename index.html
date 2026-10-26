@@ -181,6 +181,46 @@
 
         <!-- TAB 1: TIMER (Default Active View) -->
         <main id="timerTab" class="tab-content space-y-5">
+        <!-- Section 4.a: Strict 8h Cap Exceeded & Grace Cutoff Red Warning Banner -->
+        <div id="graceViolationBanner" role="alert" aria-live="assertive"
+            class="hidden w-full p-4 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 border-2 border-red-300 shadow-xl text-white font-mono flex items-center justify-between gap-3 animate-pulse">
+            <div class="flex items-center gap-3">
+                <span class="text-3xl" aria-hidden="true">⚠️</span>
+                <div>
+                    <div id="graceViolationTitle" class="font-extrabold text-sm sm:text-base text-white tracking-wide">
+                        STRICT 8H CAP EXCEEDED — CLOCK OUT NOW
+                    </div>
+                    <div id="graceViolationCountdown" class="text-xs sm:text-sm text-red-100 font-semibold mt-0.5">
+                        Exceeded 08h 00m 00s. Calculating grace period...
+                    </div>
+                </div>
+            </div>
+            <div class="shrink-0 text-right">
+                <span id="graceSecondsBadge" class="px-3 py-1.5 rounded-lg bg-black/50 border border-yellow-400 text-xs sm:text-sm font-bold text-yellow-300 font-mono">
+                    --
+                </span>
+            </div>
+        </div>
+
+        <!-- Non-blocking OCR / Gemini AI Re-parse Safety Confirmation Badge -->
+        <div id="reparseConfirmBadge" role="alert"
+            class="hidden w-full p-3.5 rounded-xl bg-amber-950/95 border-2 border-amber-500 shadow-xl text-amber-200 text-xs sm:text-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer transition-all hover:bg-amber-900/90">
+            <div class="flex items-center gap-2">
+                <span class="text-xl" aria-hidden="true">🛡️</span>
+                <span id="reparseConfirmText" class="font-medium text-amber-100">
+                    New scan detected: -- vs current running --. Tap to apply.
+                </span>
+            </div>
+            <div class="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                <button id="reparseApplyBtn" type="button" class="px-3 py-1.5 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-lg text-xs shadow transition active:scale-95">
+                    Tap to Apply
+                </button>
+                <button id="reparseDismissBtn" type="button" class="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white rounded-lg text-xs border border-slate-700 transition" title="Dismiss new scan">
+                    ✕ Dismiss
+                </button>
+            </div>
+        </div>
+
         <!-- Contextual Next Action Dynamic Banner -->
         <div id="nextActionBanner" class="w-full px-4 py-3 rounded-xl text-xs md:text-sm font-medium transition-all duration-300 flex items-center justify-between border shadow-sm">
             <div class="flex items-center gap-2" id="nextActionContent">

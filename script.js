@@ -8,6 +8,7 @@ let periodicSyncInterval = null;
 let neonSaveTimeout = null;
 let alarmInterval = null;
 let targetTimestamp = null;
+let targetStopTimestamp = null; // Immutable Wall-Clock Anchor Unix timestamp (ms)
 let alarmDismissed = false;
 let alarmActive = false;
 let alarmNotification = null;
@@ -23,6 +24,16 @@ let selectedDayIndex = 0;
 let totalTrackedSec = 0;
 let springboardAutoStopped = false;
 
+// Active session tracking & monotonic sync guard
+const localActiveSession = {
+    get updatedAt() {
+        return state.updatedAt || 0;
+    },
+    set updatedAt(val) {
+        state.updatedAt = val;
+    }
+};
+
 // Master application state for sync & AI validation
 const state = {
     userPin: (function () {
@@ -32,6 +43,9 @@ const state = {
     loggedSeconds: 0,
     remainingSeconds: TARGET_DAILY_SEC,
     dailyCapSeconds: TARGET_DAILY_SEC,
+    targetStopTimestamp: null,
+    updatedAt: Date.now(),
+    overtimeSeconds: 0,
     timesheetData: [],
     detectedDays: [],
     isAiSyncing: false,
@@ -248,7 +262,9 @@ const SESSION_KEYS = {
     targetTimestamp: 'snip8_targetTimestamp',
     lastUpdated: 'snip8_lastUpdated',
     totalTrackedSec: 'snip8_totalTrackedSec',
-    alarmAck: 'snip8_alarmAckTarget'
+    alarmAck: 'snip8_alarmAckTarget',
+    storedBaselineSeconds: 'snip8_storedBaselineSeconds',
+    storedSessionTimestamp: 'snip8_storedSessionTimestamp'
 };
 
 // Elements
@@ -256,6 +272,77 @@ const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const statusContainer = document.getElementById('statusContainer');
 const dashboard = document.getElementById('dashboard');
+
+// Section 4.a Strict Cap Grace Violation Banner
+const graceViolationBanner = document.getElementById('graceViolationBanner');
+const graceViolationTitle = document.getElementById('graceViolationTitle');
+const graceViolationCountdown = document.getElementById('graceViolationCountdown');
+const graceSecondsBadge = document.getElementById('graceSecondsBadge');
+
+// OCR / Gemini AI Re-parse Safety Confirmation Badge
+const reparseConfirmBadge = document.getElementById('reparseConfirmBadge');
+const reparseConfirmText = document.getElementById('reparseConfirmText');
+const reparseApplyBtn = document.getElementById('reparseApplyBtn');
+const reparseDismissBtn = document.getElementById('reparseDismissBtn');
+let pendingReparseCallback = null;
+
+function updateGraceViolationBanner(overtimeSec, graceRemainingSec) {
+    if (!graceViolationBanner || !graceViolationCountdown || !graceSecondsBadge) return;
+    graceViolationBanner.classList.remove('hidden');
+
+    if (graceRemainingSec > 0) {
+        if (graceViolationTitle) graceViolationTitle.textContent = '⚠️ STRICT 8H CAP EXCEEDED — CLOCK OUT NOW';
+        graceViolationCountdown.textContent = `Shift time: 08h 00m + ${overtimeSec}s. Strictly ${graceRemainingSec}s remaining before reaching the hard 08h 05m 00s violation cutoff!`;
+        graceSecondsBadge.textContent = `${graceRemainingSec}s remaining`;
+        graceSecondsBadge.className = 'px-3 py-1.5 rounded-lg bg-black/50 border border-yellow-400 text-xs sm:text-sm font-bold text-yellow-300 font-mono';
+        graceViolationBanner.className = 'w-full p-4 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 border-2 border-red-300 shadow-xl text-white font-mono flex items-center justify-between gap-3 animate-pulse';
+    } else {
+        const violationSec = Math.max(0, overtimeSec - 300);
+        if (graceViolationTitle) graceViolationTitle.textContent = '🚨 SECTION 4.a CRITICAL POLICY VIOLATION';
+        graceViolationCountdown.textContent = `EXCEEDED 08h 05m 00s HARD CAP by ${violationSec}s! Springboard clock-out overdue.`;
+        graceSecondsBadge.textContent = `+${violationSec}s OVER LIMIT`;
+        graceSecondsBadge.className = 'px-3 py-1.5 rounded-lg bg-black/70 border border-red-300 text-xs sm:text-sm font-extrabold text-red-300 font-mono animate-bounce';
+        graceViolationBanner.className = 'w-full p-4 rounded-2xl bg-red-950 border-2 border-red-500 shadow-2xl text-white font-mono flex items-center justify-between gap-3';
+    }
+}
+
+function hideGraceViolationBanner() {
+    if (graceViolationBanner) graceViolationBanner.classList.add('hidden');
+}
+
+function showReparseConfirmBadge({ parsedLogged, currentRunning, onApply }) {
+    if (!reparseConfirmBadge || !reparseConfirmText) return;
+    pendingReparseCallback = onApply;
+    reparseConfirmText.textContent = `New scan detected: ${formatHms(parsedLogged)} vs current running ${formatHms(currentRunning)}. Tap to apply.`;
+    reparseConfirmBadge.classList.remove('hidden');
+
+    const handleApply = (e) => {
+        if (e) e.stopPropagation();
+        reparseConfirmBadge.classList.add('hidden');
+        if (typeof pendingReparseCallback === 'function') {
+            const cb = pendingReparseCallback;
+            pendingReparseCallback = null;
+            cb();
+        }
+    };
+
+    const handleDismiss = (e) => {
+        if (e) e.stopPropagation();
+        pendingReparseCallback = null;
+        reparseConfirmBadge.classList.add('hidden');
+    };
+
+    if (reparseApplyBtn) reparseApplyBtn.onclick = handleApply;
+    reparseConfirmBadge.onclick = (e) => {
+        if (e.target !== reparseDismissBtn) handleApply(e);
+    };
+    if (reparseDismissBtn) reparseDismissBtn.onclick = handleDismiss;
+}
+
+function hideReparseConfirmBadge() {
+    pendingReparseCallback = null;
+    if (reparseConfirmBadge) reparseConfirmBadge.classList.add('hidden');
+}
 
 // Validation Progress Controller
 function setValidationProgress(percent, message, state = 'running') {
@@ -824,118 +911,32 @@ async function triggerAiValidationFallback(base64Image, reason) {
 
         if (result && result.success) {
             const aiResult = result;
-            setValidationProgress(85, 'Applying timesheet values & syncing...');
+            const newLogged = aiResult.loggedSeconds || 28805;
+            const isTimerRunning = Boolean(state.isLiveIncrement && targetStopTimestamp && (targetStopTimestamp - Date.now()) > -300000 && (state.loggedSeconds > 0 || timerStartTime));
+            const deltaSec = Math.abs((state.loggedSeconds || 0) - newLogged);
 
-            // Respect Extracted Date on Scan:
-            const todayStr = new Date().toLocaleDateString('en-CA');
-            const now = new Date();
-            const defaultTodayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
-
-            let headerInfo = null;
-            if (aiResult.dayLabel) {
-                headerInfo = extractDayHeaderAndDate(aiResult.dayLabel);
-            }
-            if (!headerInfo && aiResult.work_date) {
-                headerInfo = extractDayHeaderAndDate(aiResult.work_date);
-            }
-            if (!headerInfo && Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
-                for (const item of aiResult.timesheetData) {
-                    if (item && item.label) {
-                        headerInfo = extractDayHeaderAndDate(item.label);
-                        if (headerInfo) break;
-                    }
+            // 3. OCR / Gemini AI Re-parse Safety Lock:
+            // When Gemini Vision returns a newly parsed payload, DO NOT silently apply it if the timer is already running
+            // and the delta between the current running time and the parsed time exceeds 5 minutes (300 seconds).
+            if (isTimerRunning && deltaSec > 300) {
+                console.warn(`[snip8 safety lock] Gemini AI scan (${formatHms(newLogged)}) differs from running session (${formatHms(state.loggedSeconds)}) by ${deltaSec}s (>5m). Requiring confirmation.`);
+                setValidationProgress(100, 'Scan completed — Confirmation needed', 'warning');
+                updateParseSourceBadge('ai', 'Pending Confirmation');
+                if (statusContainer) {
+                    statusContainer.classList.remove('animate-pulse');
+                    statusContainer.textContent = `⚠️ New scan detected: ${formatHms(newLogged)} vs current running ${formatHms(state.loggedSeconds)}. Tap badge to apply.`;
                 }
-            }
-
-            const resolvedWorkDate = headerInfo ? headerInfo.workDate : todayStr;
-            const resolvedDayLabel = headerInfo ? headerInfo.dayLabel : defaultTodayLabel;
-            const resolvedDayName = headerInfo ? headerInfo.dayName : defaultTodayLabel.split(' ')[0].replace(/,/g, '');
-
-            state.workDate = resolvedWorkDate;
-
-            // 1. Update the master state directly
-            state.loggedSeconds = aiResult.loggedSeconds || 28805;
-            state.remainingSeconds = Math.max(0, 28800 - state.loggedSeconds);
-
-            // Immediately cancel any pending debounced Neon save from previous OCR/ticker
-            if (neonSaveTimeout) {
-                clearTimeout(neonSaveTimeout);
-                neonSaveTimeout = null;
-            }
-
-            // Format detectedDays for UI table & dashboard
-            const aiH = Math.floor(state.loggedSeconds / 3600);
-            const aiM = Math.floor((state.loggedSeconds % 3600) / 60);
-            const aiS = state.loggedSeconds % 60;
-
-            if (Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
-                detectedDays = aiResult.timesheetData.map((d, i) => {
-                    let label = (d && d.label) || `${resolvedDayLabel} (AI)`;
-                    if (i === 0) {
-                        label = `${resolvedDayLabel} (AI)`;
+                showReparseConfirmBadge({
+                    parsedLogged: newLogged,
+                    currentRunning: state.loggedSeconds,
+                    onApply: async () => {
+                        await applyAiValidationResult(aiResult, base64Image);
                     }
-                    return {
-                        ...d,
-                        label,
-                        dayName: (d && d.dayName) || resolvedDayName,
-                        h: (d && d.h !== undefined) ? d.h : aiH,
-                        m: (d && d.m !== undefined) ? d.m : aiM,
-                        s: (d && d.s !== undefined) ? d.s : aiS,
-                        sec: (d && d.sec !== undefined) ? d.sec : state.loggedSeconds,
-                        shifts: (d && d.shifts) || aiResult.shifts || []
-                    };
                 });
-            } else {
-                detectedDays = [{
-                    label: `${resolvedDayLabel} (AI)`,
-                    dayName: resolvedDayName,
-                    h: aiH,
-                    m: aiM,
-                    s: aiS,
-                    sec: state.loggedSeconds,
-                    shifts: aiResult.shifts || []
-                }];
+                return true;
             }
 
-            // Master state timesheetData must be detectedDays with parsed day headers
-            state.timesheetData = detectedDays;
-
-            selectedDayIndex = 0;
-            totalTrackedSec = state.loggedSeconds;
-            baseTodaySec = state.loggedSeconds;
-            baseTotalTrackedSec = state.loggedSeconds;
-
-            if (state.loggedSeconds >= TARGET_DAILY_SEC) {
-                timerCompleted = true;
-                completedElapsedSec = 0;
-                clearCountdownTimers();
-            }
-
-            // Explicitly call the Neon database save function immediately with these updated values
-            await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData);
-            setValidationProgress(100, 'Timesheet successfully synced!', 'success');
-
-            const rawConf = aiResult.confidence || 'High';
-            const conf = rawConf.charAt(0).toUpperCase() + rawConf.slice(1).toLowerCase();
-            updateParseSourceBadge('ai', conf);
-
-            if (statusContainer) {
-                statusContainer.classList.remove('animate-pulse');
-                statusContainer.textContent = `✨ Done — Timesheet validated via Gemini Vision AI (${aiResult.confidence} confidence)`;
-                setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
-            }
-
-            if (aiValidationNotice && aiValidationDetail && aiValidationModel) {
-                aiValidationDetail.textContent = `Confidence: ${(aiResult.confidence || 'high').toUpperCase()} (${formatHms(state.loggedSeconds)} logged)`;
-                aiValidationModel.textContent = aiResult.modelUsed || 'Gemini Vision';
-                aiValidationNotice.classList.remove('hidden');
-            }
-
-            rawOcrText.textContent = `=== VALIDATED VIA AI VISION (Gemini) ===\nModel: ${aiResult.modelUsed}\nConfidence: ${aiResult.confidence}\nLogged: ${formatHms(state.loggedSeconds)}\nRemaining for 8h: ${formatHms(state.remainingSeconds)}\n\nShifts:\n${JSON.stringify(aiResult.shifts, null, 2)}`;
-
-            renderAll();
-            debouncedSaveSession();
-            return true;
+            return await applyAiValidationResult(aiResult, base64Image);
         }
     } catch (err) {
         console.warn('snip8: AI Vision validation failed:', err);
@@ -948,6 +949,133 @@ async function triggerAiValidationFallback(base64Image, reason) {
         }
     }
     return false;
+}
+
+async function applyAiValidationResult(aiResult, base64Image) {
+    setValidationProgress(85, 'Applying timesheet values & syncing...');
+
+    // Respect Extracted Date on Scan:
+    const todayStr = new Date().toLocaleDateString('en-CA');
+    const now = new Date();
+    const defaultTodayLabel = now.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+
+    let headerInfo = null;
+    if (aiResult.dayLabel) {
+        headerInfo = extractDayHeaderAndDate(aiResult.dayLabel);
+    }
+    if (!headerInfo && aiResult.work_date) {
+        headerInfo = extractDayHeaderAndDate(aiResult.work_date);
+    }
+    if (!headerInfo && Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
+        for (const item of aiResult.timesheetData) {
+            if (item && item.label) {
+                headerInfo = extractDayHeaderAndDate(item.label);
+                if (headerInfo) break;
+            }
+        }
+    }
+
+    const resolvedWorkDate = headerInfo ? headerInfo.workDate : todayStr;
+    const resolvedDayLabel = headerInfo ? headerInfo.dayLabel : defaultTodayLabel;
+    const resolvedDayName = headerInfo ? headerInfo.dayName : defaultTodayLabel.split(' ')[0].replace(/,/g, '');
+
+    state.workDate = resolvedWorkDate;
+
+    // 1. Update the master state directly
+    const newLogged = aiResult.loggedSeconds || 28805;
+    state.loggedSeconds = newLogged;
+    state.remainingSeconds = Math.max(0, 28800 - state.loggedSeconds);
+
+    // 1. Wall-Clock Absolute Anchoring (Immutable Anchor Pattern):
+    // targetStopTimestamp = parsedAtTimestamp + (8 * 3600 - loggedSecondsAtParse) * 1000
+    const parsedAtTimestamp = Date.now();
+    targetStopTimestamp = parsedAtTimestamp + Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - newLogged) * 1000;
+    targetTimestamp = new Date(targetStopTimestamp);
+    state.targetStopTimestamp = targetStopTimestamp;
+    state.updatedAt = parsedAtTimestamp;
+    localActiveSession.updatedAt = parsedAtTimestamp;
+
+    // Immediately cancel any pending debounced Neon save from previous OCR/ticker
+    if (neonSaveTimeout) {
+        clearTimeout(neonSaveTimeout);
+        neonSaveTimeout = null;
+    }
+
+    // Format detectedDays for UI table & dashboard
+    const aiH = Math.floor(state.loggedSeconds / 3600);
+    const aiM = Math.floor((state.loggedSeconds % 3600) / 60);
+    const aiS = state.loggedSeconds % 60;
+
+    if (Array.isArray(aiResult.timesheetData) && aiResult.timesheetData.length > 0) {
+        detectedDays = aiResult.timesheetData.map((d, i) => {
+            let label = (d && d.label) || `${resolvedDayLabel} (AI)`;
+            if (i === 0) {
+                label = `${resolvedDayLabel} (AI)`;
+            }
+            return {
+                ...d,
+                label,
+                dayName: (d && d.dayName) || resolvedDayName,
+                h: (d && d.h !== undefined) ? d.h : aiH,
+                m: (d && d.m !== undefined) ? d.m : aiM,
+                s: (d && d.s !== undefined) ? d.s : aiS,
+                sec: (d && d.sec !== undefined) ? d.sec : state.loggedSeconds,
+                shifts: (d && d.shifts) || aiResult.shifts || []
+            };
+        });
+    } else {
+        detectedDays = [{
+            label: `${resolvedDayLabel} (AI)`,
+            dayName: resolvedDayName,
+            h: aiH,
+            m: aiM,
+            s: aiS,
+            sec: state.loggedSeconds,
+            shifts: aiResult.shifts || []
+        }];
+    }
+
+    // Master state timesheetData must be detectedDays with parsed day headers
+    state.timesheetData = detectedDays;
+
+    selectedDayIndex = 0;
+    totalTrackedSec = state.loggedSeconds;
+    baseTodaySec = state.loggedSeconds;
+    baseTotalTrackedSec = state.loggedSeconds;
+
+    if (state.loggedSeconds >= TARGET_DAILY_SEC) {
+        timerCompleted = true;
+        completedElapsedSec = 0;
+    } else {
+        timerCompleted = false;
+        completedElapsedSec = 0;
+    }
+
+    // Explicitly call the Neon database save function immediately with these updated values
+    await saveSessionToNeon(state.loggedSeconds, state.remainingSeconds, state.timesheetData);
+    setValidationProgress(100, 'Timesheet successfully synced!', 'success');
+
+    const rawConf = aiResult.confidence || 'High';
+    const conf = rawConf.charAt(0).toUpperCase() + rawConf.slice(1).toLowerCase();
+    updateParseSourceBadge('ai', conf);
+
+    if (statusContainer) {
+        statusContainer.classList.remove('animate-pulse');
+        statusContainer.textContent = `✨ Done — Timesheet validated via Gemini Vision AI (${aiResult.confidence} confidence)`;
+        setTimeout(() => { statusContainer.classList.add('hidden'); }, 3500);
+    }
+
+    if (aiValidationNotice && aiValidationDetail && aiValidationModel) {
+        aiValidationDetail.textContent = `Confidence: ${(aiResult.confidence || 'high').toUpperCase()} (${formatHms(state.loggedSeconds)} logged)`;
+        aiValidationModel.textContent = aiResult.modelUsed || 'Gemini Vision';
+        aiValidationNotice.classList.remove('hidden');
+    }
+
+    rawOcrText.textContent = `=== VALIDATED VIA AI VISION (Gemini) ===\nModel: ${aiResult.modelUsed}\nConfidence: ${aiResult.confidence}\nLogged: ${formatHms(state.loggedSeconds)}\nRemaining for 8h: ${formatHms(state.remainingSeconds)}\n\nShifts:\n${JSON.stringify(aiResult.shifts, null, 2)}`;
+
+    renderAll({ forceNewAnchor: true });
+    debouncedSaveSession();
+    return true;
 }
 
 async function parseText(rawText, base64Image = null) {
@@ -1267,12 +1395,49 @@ async function parseText(rawText, base64Image = null) {
         if (handledByAi) return;
     }
 
-    // 10. Immediate Neon Save with Header Total:
+    // 10. Immediate Neon Save with Header Total (Guarded by Re-parse Safety Lock):
     const finalLoggedSec = totalHeaderSec > 0 ? totalHeaderSec : calculatedShiftSec;
+    const isTimerRunning = Boolean(state.isLiveIncrement && targetStopTimestamp && (targetStopTimestamp - Date.now()) > -300000 && (state.loggedSeconds > 0 || timerStartTime));
+    const deltaSec = Math.abs((state.loggedSeconds || 0) - finalLoggedSec);
+
+    // 3. OCR / Gemini AI Re-parse Safety Lock:
+    // When local OCR completes, DO NOT silently apply if the timer is already running
+    // and the delta between the current running time and the parsed time exceeds 5 minutes (300s).
+    if (isTimerRunning && deltaSec > 300) {
+        console.warn(`[snip8 safety lock] Local OCR scan (${formatHms(finalLoggedSec)}) differs from running session (${formatHms(state.loggedSeconds)}) by ${deltaSec}s (>5m). Requiring confirmation.`);
+        setValidationProgress(100, 'Scan completed — Confirmation needed', 'warning');
+        updateParseSourceBadge('ocr');
+        if (statusContainer) {
+            statusContainer.classList.remove('animate-pulse');
+            statusContainer.textContent = `⚠️ New scan detected: ${formatHms(finalLoggedSec)} vs current running ${formatHms(state.loggedSeconds)}. Tap badge to apply.`;
+        }
+        showReparseConfirmBadge({
+            parsedLogged: finalLoggedSec,
+            currentRunning: state.loggedSeconds,
+            onApply: async () => {
+                await applyLocalOcrResult(finalLoggedSec, totalHeaderSec, calculatedShiftSec, extractedShifts);
+            }
+        });
+        return;
+    }
+
+    await applyLocalOcrResult(finalLoggedSec, totalHeaderSec, calculatedShiftSec, extractedShifts);
+}
+
+async function applyLocalOcrResult(finalLoggedSec, totalHeaderSec, calculatedShiftSec, extractedShifts) {
     const finalRemainingSec = Math.max(0, 28800 - finalLoggedSec);
 
     state.loggedSeconds = finalLoggedSec;
     state.remainingSeconds = finalRemainingSec;
+
+    // 1. Wall-Clock Absolute Anchoring (Immutable Anchor Pattern):
+    // targetStopTimestamp = parsedAtTimestamp + (8 * 3600 - loggedSecondsAtParse) * 1000
+    const parsedAtTimestamp = Date.now();
+    targetStopTimestamp = parsedAtTimestamp + Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - finalLoggedSec) * 1000;
+    targetTimestamp = new Date(targetStopTimestamp);
+    state.targetStopTimestamp = targetStopTimestamp;
+    state.updatedAt = parsedAtTimestamp;
+    localActiveSession.updatedAt = parsedAtTimestamp;
 
     const parsedShifts = extractedShifts && extractedShifts.length > 0
         ? extractedShifts
@@ -1301,7 +1466,9 @@ async function parseText(rawText, base64Image = null) {
     if (finalLoggedSec >= TARGET_DAILY_SEC) {
         timerCompleted = true;
         completedElapsedSec = 0;
-        clearCountdownTimers();
+    } else {
+        timerCompleted = false;
+        completedElapsedSec = 0;
     }
 
     // Cancel any pending debounced save so it doesn't overwrite
@@ -1319,7 +1486,8 @@ async function parseText(rawText, base64Image = null) {
     updateParseSourceBadge('ocr');
 
     if (aiValidationNotice) aiValidationNotice.classList.add('hidden');
-    renderAll();
+    renderAll({ forceNewAnchor: true });
+    debouncedSaveSession();
 }
 
 function formatHms(seconds) {
@@ -1341,50 +1509,33 @@ function getElapsedSeconds() {
 }
 
 function updateLoggedDisplays() {
-    // Ensure the ticker does NOT recalculate and overwrite logged_seconds if the daily cap has been reached
-    // or if an AI sync is currently committing to the database
+    // Ensure the ticker does NOT recalculate and overwrite logged_seconds if an AI sync is committing
     if (state.isAiSyncing) return;
 
-    // Freeze on Cap Protection: explicitly disallow any timer tickers from recalculating downwards, and freeze remaining time at 00:00:00
-    if (state.loggedSeconds >= TARGET_DAILY_SEC || baseTodaySec >= TARGET_DAILY_SEC) {
-        const finalTodaySec = Math.max(baseTodaySec, state.loggedSeconds, TARGET_DAILY_SEC);
-        const finalTotalSec = Math.max(baseTotalTrackedSec, totalTrackedSec, finalTodaySec);
-        state.loggedSeconds = finalTodaySec;
-        state.remainingSeconds = 0;
-        dispTodayLogged.textContent = formatHms(finalTodaySec);
-        dispTotalTracked.textContent = formatHms(finalTotalSec);
-        dispRemaining.textContent = formatHms(0);
-        if (countdown) {
-            countdown.textContent = "00:00:00";
-            countdown.classList.remove('text-white');
-            countdown.classList.add('text-emerald-400');
-        }
-        const today = detectedDays[selectedDayIndex] || { label: 'Active Day' };
-        dispTodayLabel.textContent = `${today.label} Active Column • 8h Cap Reached`;
-        updateProgressBar(finalTodaySec);
-        return;
-    }
-
     const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
-    let elapsed = 0;
+    const targetMs = targetStopTimestamp || (targetTimestamp instanceof Date ? targetTimestamp.getTime() : (targetTimestamp ? Number(targetTimestamp) : null));
 
-    if (isLiveEnabled && timerStartTime) {
-        if (timerCompleted) {
-            elapsed = completedElapsedSec;
-        } else {
-            elapsed = getElapsedSeconds();
-        }
-    }
+    let currentTodaySec = baseTodaySec;
+    let remSec = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - currentTodaySec);
 
-    let currentTodaySec = baseTodaySec + elapsed;
-    let remSec = Math.max(0, TARGET_DAILY_SEC - currentTodaySec);
-
-    // If targetTimestamp is set, anchor directly against absolute wall-clock
-    if (isLiveEnabled && targetTimestamp && !timerCompleted) {
-        const targetMs = targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp);
+    // 1. Wall-Clock Absolute Anchoring (Immutable Anchor Pattern):
+    // All live countdown displays, chimes, and stop clock labels MUST derive directly from targetStopTimestamp - Date.now()
+    if (targetMs) {
         const msRemaining = targetMs - Date.now();
-        remSec = Math.max(0, Math.round(msRemaining / 1000));
-        currentTodaySec = Math.max(currentTodaySec, TARGET_DAILY_SEC - remSec);
+        if (msRemaining > 0) {
+            remSec = Math.max(0, Math.ceil(msRemaining / 1000));
+            currentTodaySec = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - remSec);
+            state.overtimeSeconds = 0;
+        } else {
+            remSec = 0;
+            const overtimeSec = Math.floor((Date.now() - targetMs) / 1000);
+            state.overtimeSeconds = overtimeSec;
+            currentTodaySec = (state.dailyCapSeconds || TARGET_DAILY_SEC) + overtimeSec;
+        }
+    } else if (isLiveEnabled && timerStartTime) {
+        let elapsed = timerCompleted ? completedElapsedSec : getElapsedSeconds();
+        currentTodaySec = baseTodaySec + elapsed;
+        remSec = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - currentTodaySec);
     }
 
     state.loggedSeconds = currentTodaySec;
@@ -1561,6 +1712,7 @@ function initLiveIncrementToggle() {
 }
 
 // options.restore = { startTime, target, alarmDismissed } when hydrating from localStorage
+// options.forceNewAnchor = true when an accepted scan or manual override sets a new anchor
 function renderAll(options = {}) {
     const restore = options.restore || null;
     dashboard.classList.remove('hidden');
@@ -1568,23 +1720,34 @@ function renderAll(options = {}) {
     const today = detectedDays[selectedDayIndex] || { label: 'Active Day', h: 0, m: 0, s: 0, sec: 0 };
     baseTodaySec = today.sec;
     baseTotalTrackedSec = totalTrackedSec;
-    if (today.sec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC) {
+
+    // 1. IMMUTABLE WALL-CLOCK ANCHOR PATTERN:
+    // When a session starts or timesheet snip is accepted, targetStopTimestamp is computed and locked:
+    // targetStopTimestamp = parsedAtTimestamp + (8 * 3600 - loggedSecondsAtParse) * 1000
+    // Never allow re-renders or state restores to recalculate targetStopTimestamp unless
+    // user explicitly performs manual crop / clicks 'Apply Override' (options.forceNewAnchor)
+    if (restore && restore.target) {
+        targetTimestamp = restore.target instanceof Date ? restore.target : new Date(restore.target);
+        targetStopTimestamp = targetTimestamp.getTime();
+        state.targetStopTimestamp = targetStopTimestamp;
+        timerStartTime = restore.startTime || Date.now();
+    } else if (options.forceNewAnchor || !targetStopTimestamp) {
+        timerStartTime = Date.now();
+        const remSec = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - today.sec);
+        targetStopTimestamp = timerStartTime + remSec * 1000;
+        targetTimestamp = new Date(targetStopTimestamp);
+        state.targetStopTimestamp = targetStopTimestamp;
+    } else {
+        // Firmly preserve existing immutable targetStopTimestamp
+        targetTimestamp = new Date(targetStopTimestamp);
+    }
+
+    if (state.loggedSeconds >= (state.dailyCapSeconds || TARGET_DAILY_SEC)) {
         timerCompleted = true;
         completedElapsedSec = 0;
-        clearCountdownTimers();
     } else {
         timerCompleted = false;
         completedElapsedSec = 0;
-    }
-
-    if (restore) {
-        // Keep the original baseline so live increment + countdown continue seamlessly after refresh
-        timerStartTime = restore.startTime;
-        targetTimestamp = new Date(restore.target.getTime());
-    } else {
-        timerStartTime = Date.now();
-        const remSec = Math.max(0, TARGET_DAILY_SEC - today.sec);
-        targetTimestamp = new Date(timerStartTime + remSec * 1000);
     }
     updateStopTimeDisplay();
 
@@ -1662,7 +1825,8 @@ function formatClock(date) {
 }
 
 function updateStopTimeDisplay() {
-    dispStopTime.textContent = targetTimestamp ? formatClock(targetTimestamp) : '--';
+    const target = targetTimestamp || (targetStopTimestamp ? new Date(targetStopTimestamp) : null);
+    dispStopTime.textContent = target ? formatClock(target) : '--';
 }
 
 function clearCountdownTimers() {
@@ -1685,47 +1849,60 @@ function tickCountdown() {
         return;
     }
 
-    // Recalculate remaining seconds based on absolute target timestamp
-    if (targetTimestamp) {
-        const targetMs = targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp);
-        const msRemaining = targetMs - Date.now();
-        state.remainingSeconds = Math.max(0, Math.round(msRemaining / 1000));
-    } else {
-        state.remainingSeconds = Math.max(0, state.remainingSeconds - 1);
-    }
+    // 1. Wall-Clock Absolute Anchoring:
+    // Derive remaining time directly from targetStopTimestamp - Date.now()
+    const targetMs = targetStopTimestamp || (targetTimestamp instanceof Date ? targetTimestamp.getTime() : (targetTimestamp ? Number(targetTimestamp) : null));
 
-    // Ensure the ticker does NOT recalculate and overwrite logged_seconds if the daily cap has been reached
-    // or if an AI sync is currently committing to the database
-    if (state.isAiSyncing || baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC || state.remainingSeconds <= 0) {
-        if (baseTodaySec >= TARGET_DAILY_SEC || state.loggedSeconds >= TARGET_DAILY_SEC || state.remainingSeconds <= 0) {
+    if (targetMs) {
+        const msRemaining = targetMs - Date.now();
+        if (msRemaining > 0) {
+            // Live countdown running normally before 8h cap
+            state.remainingSeconds = Math.max(0, Math.ceil(msRemaining / 1000));
+            state.overtimeSeconds = 0;
+            const sec = state.remainingSeconds;
+            const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+            const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+            const s = String(sec % 60).padStart(2, '0');
+            countdown.textContent = `${h}:${m}:${s}`;
+            countdown.classList.remove('text-emerald-400');
+            countdown.classList.add('text-white');
+            hideGraceViolationBanner();
+        } else {
+            // 4. Section 4.a Strict Cap Enforcement:
+            // If the countdown reaches 00:00:00 (or Date.now() >= targetStopTimestamp),
+            // immediately trigger the audio chime and persistent visual alert.
+            state.remainingSeconds = 0;
             countdown.textContent = "00:00:00";
             countdown.classList.remove('text-white');
             countdown.classList.add('text-emerald-400');
-            clearCountdownTimers();
             timerCompleted = true;
-            completedElapsedSec = 0;
-            state.remainingSeconds = 0;
-            state.isLiveIncrement = false;
-            try { localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, 'false'); } catch (e) { }
-            const liveToggle = document.getElementById('liveIncrementToggle') || document.getElementById('liveIncrementSwitch');
-            if (liveToggle) liveToggle.checked = false;
-            updateLoggedDisplays();
-            updateStopTimeDisplay();
-            debouncedSaveSession();
-            if (!alarmDismissed) triggerAlarm();
+
+            if (!alarmActive && !alarmDismissed) {
+                triggerAlarm();
+            }
+
+            // Add a prominent red warning banner when time exceeds 08h 00m 00s,
+            // explicitly stating how many seconds remain before reaching the hard 08h 05m 00s violation cutoff.
+            const overtimeSec = Math.floor((Date.now() - targetMs) / 1000);
+            state.overtimeSeconds = overtimeSec;
+            const graceCutoffSec = 300; // 5-minute grace window before violation cutoff
+            const graceRemainingSec = Math.max(0, graceCutoffSec - overtimeSec);
+
+            updateGraceViolationBanner(overtimeSec, graceRemainingSec);
+
             if (!springboardAutoStopped) {
                 springboardAutoStopped = true;
                 requestSpringboardStop();
             }
         }
-        return;
+    } else {
+        state.remainingSeconds = Math.max(0, state.remainingSeconds - 1);
+        const sec = state.remainingSeconds;
+        const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+        const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+        const s = String(sec % 60).padStart(2, '0');
+        countdown.textContent = `${h}:${m}:${s}`;
     }
-
-    const sec = state.remainingSeconds;
-    const h = String(Math.floor(sec / 3600)).padStart(2, '0');
-    const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
-    const s = String(sec % 60).padStart(2, '0');
-    countdown.textContent = `${h}:${m}:${s}`;
 
     updateLoggedDisplays();
     updateStopTimeDisplay();
@@ -1733,9 +1910,7 @@ function tickCountdown() {
 
 function startCountdown() {
     clearCountdownTimers();
-    if (!targetTimestamp) return;
-    countdown.classList.remove('text-emerald-400');
-    countdown.classList.add('text-white');
+    if (!targetStopTimestamp && !targetTimestamp) return;
 
     countdownInterval = setInterval(() => {
         if (!state.isLiveIncrement) {
@@ -1750,17 +1925,18 @@ function startCountdown() {
     window.liveTimerInterval = countdownInterval;
     state.tickerInterval = countdownInterval;
 
-    // One-shot deadline timer: background tabs throttle repeating intervals (down to ~1/min),
-    // while a single non-chained timeout is much more likely to fire on time.
-    const remainingMs = targetTimestamp - Date.now();
-    if (remainingMs > 0) deadlineTimeout = setTimeout(() => {
-        if (!state.isLiveIncrement) return;
-        tickCountdown();
-    }, remainingMs + 50);
+    const targetMs = targetStopTimestamp || (targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp));
+    const remainingMs = targetMs - Date.now();
+    if (remainingMs > 0) {
+        deadlineTimeout = setTimeout(() => {
+            if (!state.isLiveIncrement) return;
+            tickCountdown();
+        }, remainingMs + 50);
+    }
 
     // Periodic cloud sync every 60s while timer runs
     periodicSyncInterval = setInterval(() => {
-        if (targetTimestamp && countdownInterval && state.isLiveIncrement) {
+        if (targetStopTimestamp && countdownInterval && state.isLiveIncrement) {
             debouncedSaveSession();
         }
     }, 60000);
@@ -1870,25 +2046,28 @@ async function handleReturningToForeground() {
     const isLiveEnabled = liveIncrementToggle ? liveIncrementToggle.checked : true;
     const dailyCap = state.dailyCapSeconds || TARGET_DAILY_SEC;
 
-    // 1. Seamlessly resume local ticker if enabled and daily cap not reached
-    if (isLiveEnabled && !timerCompleted) {
-        if (targetTimestamp && (targetTimestamp - Date.now()) > 0) {
-            // Anchor against existing absolute target timestamp so sleeping screen doesn't cause drift
-            const msRemaining = (targetTimestamp instanceof Date ? targetTimestamp.getTime() : Number(targetTimestamp)) - Date.now();
-            const remSec = Math.max(0, Math.round(msRemaining / 1000));
-            state.remainingSeconds = remSec;
-            const newLogged = Math.min(dailyCap, dailyCap - remSec);
+    // 1. Immutable Wall-Clock Anchor: Resume local ticker anchored firmly against targetStopTimestamp
+    const targetMs = targetStopTimestamp || (targetTimestamp instanceof Date ? targetTimestamp.getTime() : (targetTimestamp ? Number(targetTimestamp) : null));
+    if (isLiveEnabled && targetMs) {
+        targetStopTimestamp = targetMs;
+        targetTimestamp = new Date(targetMs);
+        state.targetStopTimestamp = targetStopTimestamp;
+        const msRemaining = targetMs - Date.now();
+        if (msRemaining > 0) {
+            state.remainingSeconds = Math.max(0, Math.ceil(msRemaining / 1000));
+            const newLogged = Math.max(0, dailyCap - state.remainingSeconds);
             baseTodaySec = Math.max(baseTodaySec, newLogged);
-            baseTotalTrackedSec = Math.max(baseTotalTrackedSec, baseTodaySec);
             state.loggedSeconds = baseTodaySec;
-            state.totalLoggedSeconds = baseTodaySec;
-            timerStartTime = Date.now();
-            targetTimestamp = new Date(Date.now() + remSec * 1000);
+            state.overtimeSeconds = 0;
         } else {
-            timerStartTime = Date.now();
-            const remSec = Math.max(0, dailyCap - baseTodaySec);
-            targetTimestamp = new Date(timerStartTime + remSec * 1000);
+            state.remainingSeconds = 0;
+            const overtimeSec = Math.floor((Date.now() - targetMs) / 1000);
+            state.overtimeSeconds = overtimeSec;
+            state.loggedSeconds = dailyCap + overtimeSec;
+            baseTodaySec = state.loggedSeconds;
         }
+        baseTotalTrackedSec = Math.max(baseTotalTrackedSec, baseTodaySec);
+        state.totalLoggedSeconds = baseTodaySec;
         startCountdown();
         updateStopTimeDisplay();
         updateLoggedDisplays();
@@ -1915,15 +2094,25 @@ async function handleReturningToForeground() {
         const row = data?.row || data?.session;
 
         if (row && !row.is_fresh_default) {
+            // Guarded Session Restores & Sync Merging check:
+            const incomingUpdatedAt = new Date(row.updated_at || row.updatedAt || 0).getTime();
+            const localUpdatedAt = localActiveSession.updatedAt || state.updatedAt || 0;
+            if (localUpdatedAt > 0 && incomingUpdatedAt < localUpdatedAt) {
+                console.log('[snip8 sync guard] Skipping stale foreground snapshot (incoming < local active session)');
+                return;
+            }
+
             const catchUp = applyWallClockCatchUp(row, dailyCap);
             const remoteLogged = catchUp.loggedSeconds;
             const remoteRem = catchUp.remainingSeconds;
 
-            // Monotonic fast-forward: if another device progressed further, silently update
+            // Monotonic fast-forward: if another device progressed further, safely merge
             if (remoteLogged > (state.totalLoggedSeconds || state.loggedSeconds || 0)) {
                 state.totalLoggedSeconds = remoteLogged;
                 state.loggedSeconds = remoteLogged;
                 state.remainingSeconds = remoteRem;
+                state.updatedAt = incomingUpdatedAt;
+                localActiveSession.updatedAt = incomingUpdatedAt;
 
                 baseTodaySec = remoteLogged;
                 baseTotalTrackedSec = Math.max(baseTotalTrackedSec, remoteLogged);
@@ -1952,14 +2141,15 @@ async function handleReturningToForeground() {
                 if (remoteLogged >= dailyCap || remoteRem <= 0) {
                     timerCompleted = true;
                     completedElapsedSec = 0;
-                    state.isLiveIncrement = false;
-                    if (liveToggle) liveToggle.checked = false;
-                    clearCountdownTimers();
+                    targetStopTimestamp = Date.now() - (remoteLogged - dailyCap) * 1000;
+                    targetTimestamp = new Date(targetStopTimestamp);
+                    state.targetStopTimestamp = targetStopTimestamp;
                 } else if (state.isLiveIncrement) {
                     timerCompleted = false;
                     completedElapsedSec = 0;
-                    timerStartTime = Date.now();
-                    targetTimestamp = new Date(Date.now() + remoteRem * 1000);
+                    targetStopTimestamp = Date.now() + remoteRem * 1000;
+                    targetTimestamp = new Date(targetStopTimestamp);
+                    state.targetStopTimestamp = targetStopTimestamp;
                     startCountdown();
                     updateStopTimeDisplay();
                 } else {
@@ -2074,17 +2264,30 @@ function stopTitleFlash() {
 
 // Offset Buttons
 function adjustRemaining(seconds) {
-    if (!targetTimestamp) return;
-    targetTimestamp = new Date(targetTimestamp.getTime() + seconds * 1000);
+    if (!targetTimestamp && !targetStopTimestamp) return;
+    const currentAnchor = targetStopTimestamp || (targetTimestamp ? targetTimestamp.getTime() : Date.now());
+    targetStopTimestamp = currentAnchor + seconds * 1000;
+    targetTimestamp = new Date(targetStopTimestamp);
+    state.targetStopTimestamp = targetStopTimestamp;
+    state.updatedAt = Date.now();
+    localActiveSession.updatedAt = state.updatedAt;
+
     updateStopTimeDisplay();
-    if (timerCompleted && (targetTimestamp - new Date()) > 0) {
-        // Pushed the target back into the future: silence and re-arm
-        silenceAlarm();
-        alarmDismissed = false;
-        timerCompleted = false;
-        startCountdown();
-    } else if (countdownInterval) {
-        startCountdown(); // reschedule the precise deadline timer
+    const rem = targetStopTimestamp - Date.now();
+    if (rem > 0) {
+        // Pushed the target back into the future: reset overtime & re-arm
+        hideGraceViolationBanner();
+        state.overtimeSeconds = 0;
+        if (timerCompleted) {
+            silenceAlarm();
+            alarmDismissed = false;
+            timerCompleted = false;
+            startCountdown();
+        } else if (countdownInterval) {
+            startCountdown(); // reschedule the precise deadline timer
+        }
+    } else {
+        tickCountdown();
     }
     if (detectedDays.length) debouncedSaveSession();
     updateSyncUrl();
@@ -2219,6 +2422,12 @@ function initCrossDeviceSyncListener() {
             if (!res.ok) return;
             const data = await res.json();
 
+            // Guarded Session Restores & Sync Merging: ignore stale incoming remote data
+            const incomingUpdatedAt = new Date(data?.session?.updated_at || data?.session?.updatedAt || 0).getTime();
+            if (localActiveSession.updatedAt > 0 && incomingUpdatedAt > 0 && incomingUpdatedAt < localActiveSession.updatedAt) {
+                return;
+            }
+
             // If remote session is explicitly paused, halt local ticking
             let td = data?.session?.timesheet_data;
             if (typeof td === 'string') {
@@ -2245,6 +2454,8 @@ function initCrossDeviceSyncListener() {
 
                 timerStartTime = null;
                 targetTimestamp = null;
+                targetStopTimestamp = null;
+                state.targetStopTimestamp = null;
                 state.isLiveIncrement = false;
                 try {
                     localStorage.setItem(STORAGE_KEY_LIVE_INCREMENT, 'false');
@@ -2280,7 +2491,10 @@ function initCrossDeviceSyncListener() {
                     state.totalLoggedSeconds = catchUp.loggedSeconds;
                     state.remainingSeconds = catchUp.remainingSeconds;
                     timerStartTime = Date.now();
-                    targetTimestamp = new Date(Date.now() + catchUp.remainingSeconds * 1000);
+                    // Lock immutable anchor based on catchup remaining seconds
+                    targetStopTimestamp = Date.now() + catchUp.remainingSeconds * 1000;
+                    targetTimestamp = new Date(targetStopTimestamp);
+                    state.targetStopTimestamp = targetStopTimestamp;
                     updateLoggedDisplays();
                     updateStopTimeDisplay();
                 }
@@ -2337,6 +2551,18 @@ async function refreshSnip8Session() {
         }
 
         const row = data.session;
+        const incomingUpdatedAt = new Date(row.updated_at || 0).getTime();
+        const localLogged = state.loggedSeconds || baseTodaySec || 0;
+
+        // Guarded Session Restores & Sync Merging:
+        // if (incomingState.updatedAt < localActiveSession.updatedAt) return;
+        if (localActiveSession.updatedAt > 0 && incomingUpdatedAt > 0 && incomingUpdatedAt < localActiveSession.updatedAt && localLogged >= (row.logged_seconds || 0)) {
+            console.log('[snip8] Skipping remote refresh overwrite: local active session is newer than remote snapshot');
+            updateNeonBadge('synced', 'Neon Synced (Local newer)');
+            debouncedSaveSession();
+            return;
+        }
+
         state.workDate = row.work_date || workDate;
         const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
 
@@ -2351,6 +2577,8 @@ async function refreshSnip8Session() {
         baseTodaySec = dbLogged;
         baseTotalTrackedSec = Math.max(baseTotalTrackedSec, dbLogged);
         totalTrackedSec = baseTotalTrackedSec;
+        state.updatedAt = incomingUpdatedAt || Date.now();
+        localActiveSession.updatedAt = state.updatedAt;
 
         if (row.timesheet_data) {
             detectedDays = hydrateBreakdownFromTimesheetData(row.timesheet_data, row.work_date || workDate, dbLogged);
@@ -2384,7 +2612,10 @@ async function refreshSnip8Session() {
             timerCompleted = false;
             completedElapsedSec = 0;
             timerStartTime = Date.now();
-            targetTimestamp = new Date(Date.now() + remSec * 1000);
+            // Core Requirement 1: Wall-Clock Absolute Anchoring
+            targetStopTimestamp = Date.now() + remSec * 1000;
+            targetTimestamp = new Date(targetStopTimestamp);
+            state.targetStopTimestamp = targetStopTimestamp;
             startCountdown();
             updateStopTimeDisplay();
             fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&action=clear`, { method: 'POST' }).catch(() => {});
@@ -2441,6 +2672,12 @@ document.getElementById('resetBtn').addEventListener('click', () => {
     silenceAlarm();
     clearCountdownTimers();
     timerStartTime = null;
+    targetTimestamp = null;
+    targetStopTimestamp = null;
+    state.targetStopTimestamp = null;
+    state.overtimeSeconds = 0;
+    hideGraceViolationBanner();
+    hideReparseConfirmBadge();
     timerCompleted = false;
     completedElapsedSec = 0;
     countdown.textContent = "00:00:00";
@@ -2476,6 +2713,11 @@ document.getElementById('clearSessionBtn').addEventListener('click', () => {
     if (aiValidationNotice) aiValidationNotice.classList.add('hidden');
     silenceAlarm();
     clearCountdownTimers();
+    targetStopTimestamp = null;
+    state.targetStopTimestamp = null;
+    state.overtimeSeconds = 0;
+    hideGraceViolationBanner();
+    hideReparseConfirmBadge();
     detectedDays = [];
     selectedDayIndex = 0;
     totalTrackedSec = 0;
@@ -2486,6 +2728,8 @@ document.getElementById('clearSessionBtn').addEventListener('click', () => {
     baseTodaySec = 0;
     baseTotalTrackedSec = 0;
     alarmDismissed = false;
+    state.updatedAt = Date.now();
+    localActiveSession.updatedAt = state.updatedAt;
     weeklyTableBody.innerHTML = '';
     countdown.textContent = "00:00:00";
     countdown.classList.remove('text-emerald-400');
@@ -2515,17 +2759,31 @@ document.getElementById('manBtn').addEventListener('click', () => {
     const h = parseInt(document.getElementById('manH').value || 0, 10);
     const m = parseInt(document.getElementById('manM').value || 0, 10);
     const s = parseInt(document.getElementById('manS').value || 0, 10);
+    const manualSec = h * 3600 + m * 60 + s;
     if (detectedDays.length === 0) {
-        detectedDays = [{ label: 'Today', h, m, s, sec: h * 3600 + m * 60 + s }];
+        detectedDays = [{ label: 'Today', h, m, s, sec: manualSec }];
         selectedDayIndex = 0;
     } else if (detectedDays[selectedDayIndex]) {
         detectedDays[selectedDayIndex].h = h;
         detectedDays[selectedDayIndex].m = m;
         detectedDays[selectedDayIndex].s = s;
-        detectedDays[selectedDayIndex].sec = h * 3600 + m * 60 + s;
+        detectedDays[selectedDayIndex].sec = manualSec;
     }
     totalTrackedSec = detectedDays.reduce((acc, d) => acc + d.sec, 0);
-    renderAll();
+
+    // Apply Override: Compute and lock immutable anchor
+    const cap = state.dailyCapSeconds || TARGET_DAILY_SEC;
+    const remSec = Math.max(0, cap - manualSec);
+    targetStopTimestamp = Date.now() + remSec * 1000;
+    targetTimestamp = new Date(targetStopTimestamp);
+    state.targetStopTimestamp = targetStopTimestamp;
+    state.updatedAt = Date.now();
+    localActiveSession.updatedAt = state.updatedAt;
+    state.overtimeSeconds = 0;
+    hideGraceViolationBanner();
+    hideReparseConfirmBadge();
+
+    renderAll({ forceNewAnchor: true });
     debouncedSaveSession();
 });
 
@@ -3181,6 +3439,20 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
         }
 
         const localLogged = state.loggedSeconds || 0;
+        const incomingUpdatedAt = new Date(row.updated_at || 0).getTime();
+        // Guarded Session Restores & Sync Merging:
+        // if (incomingState.updatedAt < localActiveSession.updatedAt) return;
+        if (localActiveSession.updatedAt > 0 && incomingUpdatedAt > 0 && incomingUpdatedAt < localActiveSession.updatedAt && localLogged >= (row.logged_seconds || 0)) {
+            console.log('[snip8] Revalidation ignored: local active session is newer than Neon snapshot');
+            if (localLogged > (row.logged_seconds || 0)) {
+                updateNeonBadge('syncing', 'Syncing local progress...');
+                debouncedSaveSession();
+            } else {
+                updateNeonBadge('synced', 'Neon Synced');
+            }
+            return true;
+        }
+
         const dailyCap = Number(row.daily_cap_seconds) || TARGET_DAILY_SEC;
         const catchUp = applyWallClockCatchUp(row, dailyCap);
         const dbLogged = catchUp.loggedSeconds;
@@ -3191,6 +3463,8 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
         if (dbLogged >= 28800 || dbLogged > localLogged || localLogged === 0) {
             state.loggedSeconds = dbLogged;
             state.remainingSeconds = remSec;
+            state.updatedAt = incomingUpdatedAt || Date.now();
+            localActiveSession.updatedAt = state.updatedAt;
             if (row.last_scanned_image_url) {
                 state.lastScannedImageUrl = row.last_scanned_image_url;
                 renderLatestScannedImage(row.last_scanned_image_url, row.updated_at);
@@ -3225,7 +3499,9 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
                 timerCompleted = false;
                 completedElapsedSec = 0;
                 timerStartTime = Date.now();
-                targetTimestamp = new Date(Date.now() + remSec * 1000);
+                targetStopTimestamp = Date.now() + remSec * 1000;
+                targetTimestamp = new Date(targetStopTimestamp);
+                state.targetStopTimestamp = targetStopTimestamp;
                 startCountdown();
             } else {
                 clearCountdownTimers();
@@ -3295,12 +3571,22 @@ function readJSON(key) {
 
 function saveSession() {
     try {
+        state.updatedAt = Date.now();
+        localActiveSession.updatedAt = state.updatedAt;
+
         writeJSON(SESSION_KEYS.detectedDays, detectedDays);
         writeJSON(SESSION_KEYS.selectedDayIndex, selectedDayIndex);
         writeJSON(SESSION_KEYS.targetTimestamp, targetTimestamp ? targetTimestamp.toISOString() : null);
         // lastUpdated doubles as the live-increment baseline (when the screenshot/entry was processed)
         writeJSON(SESSION_KEYS.lastUpdated, new Date(timerStartTime || Date.now()).toISOString());
         writeJSON(SESSION_KEYS.totalTrackedSec, totalTrackedSec);
+
+        // Core Requirement 2: Guarded Session Restores & Sync Merging
+        // Preserve elapsed wall-clock increments across refreshes
+        const activeBaseline = baseTodaySec || state.loggedSeconds || 0;
+        const activeSessionTime = timerStartTime || state.updatedAt || Date.now();
+        writeJSON(SESSION_KEYS.storedBaselineSeconds, activeBaseline);
+        writeJSON(SESSION_KEYS.storedSessionTimestamp, activeSessionTime);
 
         const pin = state.userPin || getUserPin();
         const workDate = state.workDate || getWorkDate();
@@ -3363,13 +3649,18 @@ function loadSession() {
         let total = Number(readJSON(SESSION_KEYS.totalTrackedSec));
         if (!Number.isFinite(total) || total < 0) total = cleanDays.reduce((acc, d) => acc + d.sec, 0);
 
+        const storedBaseline = Number(readJSON(SESSION_KEYS.storedBaselineSeconds));
+        const storedSessionTime = Number(readJSON(SESSION_KEYS.storedSessionTimestamp));
+
         return {
             detectedDays: cleanDays,
             selectedDayIndex: idx,
             targetTimestamp: target,
             lastUpdated,
             totalTrackedSec: total,
-            alarmAckTarget: readJSON(SESSION_KEYS.alarmAck)
+            alarmAckTarget: readJSON(SESSION_KEYS.alarmAck),
+            storedBaselineSeconds: Number.isFinite(storedBaseline) ? storedBaseline : null,
+            storedSessionTimestamp: Number.isFinite(storedSessionTime) ? storedSessionTime : null
         };
     } catch (e) {
         console.warn('snip8: could not load session', e);
@@ -3420,18 +3711,53 @@ function hydrateSession() {
         return false;
     }
 
+    // Core Requirement 2: Guarded Session Restores & Sync Merging
+    // if (incomingState.updatedAt < localActiveSession.updatedAt) return;
+    const sessionUpdatedAt = session.lastUpdated.getTime();
+    if (localActiveSession.updatedAt > 0 && sessionUpdatedAt < localActiveSession.updatedAt) {
+        console.log('[snip8] Session restore ignored: active local state is newer than cached snapshot');
+        return false;
+    }
+
     detectedDays = session.detectedDays;
     state.detectedDays = detectedDays;
     state.timesheetData = detectedDays;
     selectedDayIndex = session.selectedDayIndex;
     totalTrackedSec = session.totalTrackedSec;
 
+    // Core Requirement 1: Wall-Clock Absolute Anchoring (Immutable Anchor Pattern)
+    targetStopTimestamp = session.targetTimestamp.getTime();
+    targetTimestamp = session.targetTimestamp;
+    state.targetStopTimestamp = targetStopTimestamp;
+
+    // Core Requirement 2: If restoring an in-progress session after a tab refresh,
+    // do NOT restart liveElapsed from zero against the stored baseline.
+    // Calculate true elapsed time:
+    // currentLoggedSeconds = storedBaselineSeconds + ((Date.now() - storedSessionTimestamp) / 1000)
+    let currentLoggedSeconds = null;
+    if (session.storedBaselineSeconds !== null && session.storedSessionTimestamp) {
+        const wallClockElapsedSec = Math.max(0, (Date.now() - session.storedSessionTimestamp) / 1000);
+        currentLoggedSeconds = session.storedBaselineSeconds + wallClockElapsedSec;
+    } else {
+        const activeDay = detectedDays[selectedDayIndex] || detectedDays[0];
+        const base = activeDay ? activeDay.sec : 0;
+        const wallClockElapsedSec = Math.max(0, (Date.now() - session.lastUpdated.getTime()) / 1000);
+        currentLoggedSeconds = base + wallClockElapsedSec;
+    }
+
+    baseTodaySec = currentLoggedSeconds;
+    state.loggedSeconds = currentLoggedSeconds;
+    state.totalLoggedSeconds = currentLoggedSeconds;
+    state.remainingSeconds = Math.max(0, (state.dailyCapSeconds || TARGET_DAILY_SEC) - currentLoggedSeconds);
+    localActiveSession.updatedAt = sessionUpdatedAt;
+    state.updatedAt = sessionUpdatedAt;
+
     const expiredMs = now - session.targetTimestamp;
     const acknowledged = session.alarmAckTarget === session.targetTimestamp.toISOString();
 
     renderTimesheetBreakdown({
         restore: {
-            startTime: session.lastUpdated.getTime(),
+            startTime: session.storedSessionTimestamp || session.lastUpdated.getTime(),
             target: session.targetTimestamp,
             alarmDismissed: acknowledged || expiredMs > ALARM_RESTORE_GRACE_MS
         }
@@ -3510,6 +3836,13 @@ function hydrateFromSyncLink() {
     // Reconstruct the live-increment baseline so logged time reaches 8h exactly at the target
     const remainingAtStartMs = Math.max(0, TARGET_DAILY_SEC - sync.loggedSec) * 1000;
     const startTime = Math.min(now.getTime(), sync.target.getTime() - remainingAtStartMs);
+
+    // Lock immutable anchor pattern
+    targetStopTimestamp = sync.target.getTime();
+    targetTimestamp = sync.target;
+    state.targetStopTimestamp = targetStopTimestamp;
+    state.updatedAt = Date.now();
+    localActiveSession.updatedAt = state.updatedAt;
 
     let ack = null;
     try { ack = readJSON(SESSION_KEYS.alarmAck); } catch (e) { }
