@@ -6,11 +6,11 @@ let countdownInterval = null;
 let deadlineTimeout = null;
 let periodicSyncInterval = null;
 let neonSaveTimeout = null;
-let alarmInterval = null;
+let alarmWatchdogInterval = null;
 let targetTimestamp = null;
 let targetStopTimestamp = null; // Immutable Wall-Clock Anchor Unix timestamp (ms)
 let alarmDismissed = false;
-let alarmActive = false;
+let isAlarmRinging = false;
 let alarmNotification = null;
 let titleFlashInterval = null;
 const BASE_TITLE = document.title;
@@ -508,6 +508,21 @@ function clearUserPin() {
 // and resume it on every gesture/alarm instead of spawning a new (blocked) context per beep.
 let audioCtx = null;
 
+// Continuous alarm engine state.
+// Beeps are scheduled ahead on the AUDIO clock (ctx.currentTime), which is not throttled in
+// background tabs, so the alarm keeps ringing even while you're working in the Springboard tab.
+let alarmGain = null;            // master gain owning the active (ringing) alarm schedule
+let alarmScheduledUntil = 0;     // ctx time up to which ringing beeps are scheduled
+let alarmToggle = false;         // alternates the two alarm pitches
+let alarmUrgent = false;         // true once past the 8h 05m violation cutoff (faster beeps)
+let alarmTargetMs = null;        // target that triggered the current alarm (for overtime math)
+let preArmGain = null;           // gain owning beeps pre-scheduled at the future target time
+let preArmTargetMs = null;
+let preArmCtxStart = 0;
+const ALARM_SCHEDULE_HORIZON_SEC = 90;   // > 60s so Chrome's 1/min background throttling can't create gaps
+const ALARM_REFILL_THRESHOLD_SEC = 75;
+const ALARM_MASTER_VOLUME = 0.3;
+
 function getAudioContext() {
     if (!audioCtx) {
         const AC = window.AudioContext || window.webkitAudioContext;
@@ -515,6 +530,125 @@ function getAudioContext() {
         audioCtx = new AC();
     }
     return audioCtx;
+}
+
+// Called on every user gesture: creates/unlocks the AudioContext so the alarm can sound later
+function initAudio() {
+    const ctx = getAudioContext();
+    if (ctx && (ctx.state === 'suspended' || ctx.state === 'interrupted')) {
+        ctx.resume().then(() => {
+            syncAlarmSchedule();
+            if (isAlarmRinging) refillAlarmSchedule(true);
+            updateAudioLockIndicator();
+        }).catch(() => { });
+    }
+    updateAudioLockIndicator();
+    return ctx;
+}
+
+// Schedules alternating alarm beeps (D5 / A5) between fromTime and untilTime on the audio clock
+function scheduleAlarmBeeps(ctx, destination, fromTime, untilTime, urgent, startToggle) {
+    const step = urgent ? 0.25 : 0.4;
+    const len = urgent ? 0.18 : 0.25;
+    let t = fromTime;
+    let toggle = startToggle;
+    while (t < untilTime) {
+        const osc = ctx.createOscillator();
+        const env = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(toggle ? 880 : 587.33, t); // A5 and D5 alternating
+        // Short attack/release envelope to avoid clicks
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(1, t + 0.01);
+        env.gain.setValueAtTime(1, t + len - 0.02);
+        env.gain.linearRampToValueAtTime(0, t + len);
+        osc.connect(env);
+        env.connect(destination);
+        osc.start(t);
+        osc.stop(t + len + 0.01);
+        osc.onended = () => { try { osc.disconnect(); env.disconnect(); } catch (e) { } };
+        toggle = !toggle;
+        t += step;
+    }
+    return { until: t, toggle };
+}
+
+// Keeps the ringing alarm scheduled ~90s ahead. reset=true rebuilds the schedule from "now".
+function refillAlarmSchedule(reset = false) {
+    if (!isAlarmRinging) return;
+    const ctx = getAudioContext();
+    if (!ctx || ctx.state !== 'running') return;
+    if (reset || !alarmGain) {
+        if (alarmGain) { try { alarmGain.disconnect(); } catch (e) { } }
+        alarmGain = ctx.createGain();
+        alarmGain.gain.setValueAtTime(ALARM_MASTER_VOLUME, ctx.currentTime);
+        alarmGain.connect(ctx.destination);
+        alarmScheduledUntil = ctx.currentTime + 0.05;
+    }
+    if (alarmScheduledUntil - ctx.currentTime > ALARM_REFILL_THRESHOLD_SEC) return;
+    const from = Math.max(alarmScheduledUntil, ctx.currentTime + 0.05);
+    const r = scheduleAlarmBeeps(ctx, alarmGain, from, ctx.currentTime + ALARM_SCHEDULE_HORIZON_SEC, alarmUrgent, alarmToggle);
+    alarmScheduledUntil = r.until;
+    alarmToggle = r.toggle;
+}
+
+function cancelPreArm() {
+    if (preArmGain) { try { preArmGain.disconnect(); } catch (e) { } }
+    preArmGain = null;
+    preArmTargetMs = null;
+    preArmCtxStart = 0;
+}
+
+// Target the alarm should be armed for (null when paused / no countdown)
+function getArmableTargetMs() {
+    if (!state.isLiveIncrement) return null;
+    const t = targetStopTimestamp || (targetTimestamp instanceof Date ? targetTimestamp.getTime() : (targetTimestamp ? Number(targetTimestamp) : null));
+    return Number.isFinite(t) && t > 0 ? t : null;
+}
+
+// Pre-schedules the alarm sound at the exact target time on the audio clock, so it starts on
+// time even if the tab is in the background and JS timers are throttled. Re-arms on any change.
+function syncAlarmSchedule() {
+    const ctx = audioCtx;
+    const target = getArmableTargetMs();
+    if (!ctx || ctx.state !== 'running' || !target || isAlarmRinging || alarmDismissed) {
+        cancelPreArm();
+        return;
+    }
+    const leadSec = (target - Date.now()) / 1000;
+    if (leadSec <= 0 || leadSec > 16 * 3600) {
+        cancelPreArm();
+        return;
+    }
+    const desiredStart = ctx.currentTime + leadSec;
+    if (preArmGain && preArmTargetMs === target && Math.abs(preArmCtxStart - desiredStart) < 0.75) return;
+    cancelPreArm();
+    preArmGain = ctx.createGain();
+    preArmGain.gain.setValueAtTime(ALARM_MASTER_VOLUME, ctx.currentTime);
+    preArmGain.connect(ctx.destination);
+    scheduleAlarmBeeps(ctx, preArmGain, desiredStart, desiredStart + ALARM_SCHEDULE_HORIZON_SEC, false, false);
+    preArmTargetMs = target;
+    preArmCtxStart = desiredStart;
+}
+
+// Header button doubles as an "audio locked" indicator until the page gets a user gesture
+let lastAudioLockState = null;
+function updateAudioLockIndicator() {
+    const btn = document.getElementById('testAudioBtn');
+    if (!btn) return;
+    const locked = !audioCtx || audioCtx.state !== 'running';
+    const key = locked ? 'locked' : 'ok';
+    if (key === lastAudioLockState) return;
+    lastAudioLockState = key;
+    if (locked) {
+        btn.innerHTML = '<span>🔇</span> Enable Alarm Sound';
+        btn.title = 'Your browser blocks sound until you interact with the page once. Click to enable the alarm sound.';
+        btn.classList.add('ring-2', 'ring-amber-400', 'text-amber-300');
+    } else {
+        btn.innerHTML = '<span>🔔</span> Test Chime';
+        btn.title = 'Alarm sound enabled. Click to test.';
+        btn.classList.remove('ring-2', 'ring-amber-400', 'text-amber-300');
+    }
 }
 
 async function ensureAudioRunning() {
@@ -564,8 +698,8 @@ async function playBeep() {
 }
 
 // Unlock audio on any user gesture so the alarm can sound later without interaction
-['pointerdown', 'keydown', 'touchstart'].forEach(evt =>
-    window.addEventListener(evt, () => { ensureAudioRunning(); }, { passive: true })
+['click', 'pointerdown', 'touchstart', 'touchend', 'keydown'].forEach(evt =>
+    document.addEventListener(evt, initAudio, { capture: true, passive: true })
 );
 
 // ===== Desktop Notifications =====
@@ -580,12 +714,17 @@ function requestNotificationPermission() {
     } catch (e) { /* unsupported */ }
 }
 
-function showAlarmNotification() {
+// OS-level notification fallback (works even when sound is blocked or the tab is hidden)
+function triggerSystemNotification(urgent = false) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     try {
-        alarmNotification = new Notification('⏰ snip8 — 8 hours reached', {
-            body: 'Stop your timer in Springboard / Clockify now. The 5-minute grace period has started.',
+        if (alarmNotification) { try { alarmNotification.close(); } catch (e) { } }
+        alarmNotification = new Notification(urgent ? '🚨 snip8: 8h 05m GRACE CUTOFF PASSED!' : '🚨 snip8: 8-Hour Target Reached!', {
+            body: urgent
+                ? 'You are now past the 5-minute grace period. Stop your Springboard timer immediately.'
+                : 'Your 8-hour shift target is reached. Stop your Springboard timer immediately.',
             tag: 'snip8-alarm',
+            renotify: true,
             requireInteraction: true,
             icon: 'images/favicon.ico'
         });
@@ -1679,6 +1818,9 @@ function initLiveIncrementToggle() {
                 if (!timerCompleted && state.remainingSeconds > 0 && !countdownInterval) {
                     timerStartTime = Date.now();
                     targetTimestamp = new Date(timerStartTime + state.remainingSeconds * 1000);
+                    targetStopTimestamp = targetTimestamp.getTime();
+                    state.targetStopTimestamp = targetStopTimestamp;
+                    alarmDismissed = false;
                     startCountdown();
                     updateStopTimeDisplay();
                 }
@@ -1802,8 +1944,13 @@ function renderAll(options = {}) {
 
     // Re-arm for the new target. Uses silenceAlarm() rather than stopAlarm(): the old code called
     // stopAlarm() here, which set alarmDismissed = true and prevented the alarm from ever firing.
-    silenceAlarm();
-    alarmDismissed = restore ? !!restore.alarmDismissed : false;
+    // Never cut off an alarm that is already ringing just because a sync/re-render happened
+    // while the (still passed) target is unchanged — only an explicit tap on "Silence" may stop it.
+    const targetStillPassed = targetStopTimestamp && targetStopTimestamp <= Date.now();
+    if (!(isAlarmRinging && targetStillPassed)) {
+        silenceAlarm();
+        alarmDismissed = restore ? !!restore.alarmDismissed : false;
+    }
 
     if (restore) {
         updateSessionMeta('restored');
@@ -1877,8 +2024,9 @@ function tickCountdown() {
             countdown.classList.add('text-emerald-400');
             timerCompleted = true;
 
-            if (!alarmActive && !alarmDismissed) {
-                triggerAlarm();
+            if (!isAlarmRinging && !alarmDismissed) {
+                alarmTargetMs = targetMs;
+                startContinuousAlarm();
             }
 
             // Add a prominent red warning banner when time exceeds 08h 00m 00s,
@@ -1889,6 +2037,12 @@ function tickCountdown() {
             const graceRemainingSec = Math.max(0, graceCutoffSec - overtimeSec);
 
             updateGraceViolationBanner(overtimeSec, graceRemainingSec);
+
+            // Violation zone (> 8h 05m): escalate to a faster, more urgent alarm
+            if (overtimeSec >= graceCutoffSec && !alarmDismissed) {
+                if (!alarmTargetMs) alarmTargetMs = targetMs;
+                startContinuousAlarm({ urgent: true });
+            }
 
             if (!springboardAutoStopped) {
                 springboardAutoStopped = true;
@@ -2190,6 +2344,7 @@ document.addEventListener('visibilitychange', () => {
         handleGoingToBackground();
     } else {
         handleReturningToForeground();
+        alarmWatchdogTick();
     }
 });
 
@@ -2201,49 +2356,95 @@ window.addEventListener('pageshow', () => {
     handleReturningToForeground();
 });
 
-async function triggerAlarm() {
-    if (alarmActive) return;
-    alarmActive = true;
+// Starts the continuous alarm. Keeps ringing until the user taps "Silence & Stop Timer".
+// Calling again with { urgent: true } escalates an already-ringing alarm (violation zone).
+function startContinuousAlarm({ urgent = false } = {}) {
+    const wasRinging = isAlarmRinging;
+    if (wasRinging && (alarmUrgent || !urgent)) return;
+
+    isAlarmRinging = true;
+    alarmUrgent = urgent;
+    cancelPreArm(); // the live schedule takes over from any pre-armed beeps
+
+    initAudio();             // try to resume (succeeds if the page was ever interacted with)
+    refillAlarmSchedule(true);
+
+    showAlarmOverlay();
+    triggerSystemNotification(urgent);
+}
+
+function showAlarmOverlay() {
     alarmBanner.classList.remove('hidden');
     try { dismissBtn.focus({ preventScroll: true }); } catch (e) { }
     startTitleFlash();
-    showAlarmNotification();
+}
 
-    const ctx = getAudioContext();
-    if (ctx && ctx.state === 'suspended') {
-        try { await ctx.resume(); } catch (e) { /* locked until next gesture; notification still fires */ }
-    }
-    if (!alarmActive) return; // dismissed while awaiting resume
-
-    playBeep();
-    if (alarmInterval) clearInterval(alarmInterval);
-    alarmInterval = setInterval(playBeep, 2000);
+function hideAlarmOverlay() {
+    alarmBanner.classList.add('hidden');
+    stopTitleFlash();
 }
 
 // Internal: silence everything without marking the alarm as user-acknowledged
 function silenceAlarm() {
-    alarmActive = false;
-    alarmBanner.classList.add('hidden');
-    if (alarmInterval) {
-        clearInterval(alarmInterval);
-        alarmInterval = null;
-    }
-    stopTitleFlash();
+    isAlarmRinging = false;
+    alarmUrgent = false;
+    alarmTargetMs = null;
+    if (alarmGain) { try { alarmGain.disconnect(); } catch (e) { } }
+    alarmGain = null;
+    alarmScheduledUntil = 0;
+    cancelPreArm();
+    hideAlarmOverlay();
     if (alarmNotification) {
         try { alarmNotification.close(); } catch (e) { }
         alarmNotification = null;
     }
 }
 
-// User dismissal (button, banner click, Esc). No-op when nothing is ringing, so a stray Esc
-// before 00:00:00 can't suppress the upcoming alarm.
+// User acknowledgement. No-op when nothing is ringing.
 function stopAlarm() {
-    if (!alarmActive) return;
+    if (!isAlarmRinging) return;
     alarmDismissed = true;
+    const ackTarget = alarmTargetMs || (targetTimestamp ? targetTimestamp.getTime() : null);
     silenceAlarm();
-    if (targetTimestamp) {
-        try { writeJSON(SESSION_KEYS.alarmAck, targetTimestamp.toISOString()); } catch (e) { }
+    if (ackTarget) {
+        try { writeJSON(SESSION_KEYS.alarmAck, new Date(ackTarget).toISOString()); } catch (e) { }
     }
+}
+
+// "Silence & Stop Timer" button: the ONLY way to stop a ringing alarm
+function silenceAndStopTimer() {
+    stopAlarm();
+    requestSpringboardStop();
+}
+
+// Independent 1s watchdog (NOT cleared when the tab goes to the background, unlike the
+// countdown tickers). Fires the alarm, keeps the ringing schedule topped up, keeps the
+// grace/violation banner live even after auto-stop, and keeps the pre-armed alarm in sync.
+function alarmWatchdogTick() {
+    try {
+        const targetMs = getArmableTargetMs();
+        if (targetMs && Date.now() >= targetMs && !isAlarmRinging && !alarmDismissed) {
+            tickCountdown(); // triggers alarm + grace banner + Springboard auto-stop
+        }
+
+        if (isAlarmRinging && alarmTargetMs) {
+            const overtimeSec = Math.max(0, Math.floor((Date.now() - alarmTargetMs) / 1000));
+            updateGraceViolationBanner(overtimeSec, Math.max(0, 300 - overtimeSec));
+            if (overtimeSec >= 300 && !alarmUrgent) startContinuousAlarm({ urgent: true });
+            refillAlarmSchedule();
+        }
+
+        syncAlarmSchedule();
+        updateAudioLockIndicator();
+    } catch (e) {
+        console.warn('snip8: alarm watchdog error', e);
+    }
+}
+
+function startAlarmWatchdog() {
+    if (alarmWatchdogInterval) return;
+    alarmWatchdogInterval = setInterval(alarmWatchdogTick, 1000);
+    alarmWatchdogTick();
 }
 
 function startTitleFlash() {
@@ -2298,9 +2499,11 @@ document.getElementById('adjustMinus1').addEventListener('click', () => adjustRe
 document.getElementById('adjustPlus1').addEventListener('click', () => adjustRemaining(60));
 document.getElementById('adjustPlus5').addEventListener('click', () => adjustRemaining(300));
 
-// Clicking anywhere on the banner (including the Dismiss button, via bubbling) silences the alarm
-alarmBanner.addEventListener('click', stopAlarm);
-window.addEventListener('keydown', (e) => { if (e.key === 'Escape') stopAlarm(); });
+// Only an explicit tap on "Silence & Stop Timer" stops the alarm (no banner-click / Esc dismissal)
+dismissBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    silenceAndStopTimer();
+});
 
 // Helper to dispatch remote stop signal to Springboard bridge
 async function requestSpringboardStop() {
@@ -4200,6 +4403,15 @@ async function initApp() {
     initImagePreviewCard();
     initTabsAndSettings();
     updatePinUI();
+    startAlarmWatchdog();
+
+    // Ask for OS notification permission up front (alarm fallback when sound is blocked)
+    try {
+        if ('Notification' in window && Notification.permission === 'default') {
+            const p = Notification.requestPermission();
+            if (p && typeof p.catch === 'function') p.catch(() => { });
+        }
+    } catch (e) { }
 
     // Compute today's date in local time:
     const todayStr = new Date().toLocaleDateString('en-CA'); // 'YYYY-MM-DD'
