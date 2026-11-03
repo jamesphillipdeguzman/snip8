@@ -507,6 +507,8 @@ function clearUserPin() {
 // Browsers start AudioContexts "suspended" until a user gesture, so we create one context
 // and resume it on every gesture/alarm instead of spawning a new (blocked) context per beep.
 let audioCtx = null;
+let alarmPulseInterval = null;
+let isAlarmSoundActive = false;
 let alarmOscillator = null;
 let alarmGain = null;
 let alarmPulseTimeout = null;
@@ -524,25 +526,97 @@ const ALARM_MASTER_VOLUME = 0.35;
 function getAudioContext() {
     if (!audioCtx) {
         const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtxClass) return null;
-        audioCtx = new AudioCtxClass();
+        if (AudioCtxClass) {
+            audioCtx = new AudioCtxClass();
+        }
+    }
+    if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+        audioCtx.resume().catch(() => { });
     }
     return audioCtx;
 }
 
+function playToneBurst() {
+    if (!isAlarmSoundActive) return;
+    try {
+        const activeCtx = getAudioContext();
+        if (!activeCtx) return;
+
+        const osc = activeCtx.createOscillator();
+        const gain = activeCtx.createGain();
+
+        osc.type = 'sawtooth';
+        // Piercing high-low dual-tone alert
+        osc.frequency.setValueAtTime(987.77, activeCtx.currentTime); // B5
+        osc.frequency.exponentialRampToValueAtTime(659.25, activeCtx.currentTime + 0.25); // E5
+
+        gain.gain.setValueAtTime(0.4, activeCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, activeCtx.currentTime + 0.28);
+
+        osc.connect(gain);
+        gain.connect(activeCtx.destination);
+
+        osc.start();
+        osc.stop(activeCtx.currentTime + 0.3);
+        osc.onended = () => { try { osc.disconnect(); gain.disconnect(); } catch (e) { } };
+    } catch (err) {
+        console.error('Alarm tone error:', err);
+    }
+}
+
+function startContinuousAudibleAlarm() {
+    if (isAlarmSoundActive) return;
+    isAlarmSoundActive = true;
+    isAlarmRinging = true;
+
+    const ctx = getAudioContext();
+    if (ctx) {
+        // Play immediately and cycle every 600ms via standalone interval
+        playToneBurst();
+        if (alarmPulseInterval) clearInterval(alarmPulseInterval);
+        alarmPulseInterval = setInterval(playToneBurst, 600);
+    }
+
+    showAlarmOverlay();
+    triggerSystemNotification(alarmUrgent);
+}
+window.startContinuousAudibleAlarm = startContinuousAudibleAlarm;
+
+function silenceAudibleAlarm() {
+    isAlarmSoundActive = false;
+    isAlarmRinging = false;
+    alarmDismissed = true;
+    if (alarmPulseInterval) {
+        clearInterval(alarmPulseInterval);
+        alarmPulseInterval = null;
+    }
+    if (alarmPulseTimeout) {
+        clearTimeout(alarmPulseTimeout);
+        alarmPulseTimeout = null;
+    }
+    if (alarmGain && audioCtx) {
+        try { alarmGain.disconnect(); } catch (e) { }
+    }
+    alarmGain = null;
+    alarmScheduledUntil = 0;
+    cancelPreArm();
+    hideAlarmOverlay();
+    if (alarmNotification) {
+        try { alarmNotification.close(); } catch (e) { }
+        alarmNotification = null;
+    }
+}
+window.silenceAudibleAlarm = silenceAudibleAlarm;
+
 // Initialize or resume the audio context automatically on any user interaction
 function primeAudioContext() {
     try {
-        if (!audioCtx) {
-            const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
-            if (AudioCtxClass) {
-                audioCtx = new AudioCtxClass();
-            }
-        }
-        if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
-            audioCtx.resume().then(() => {
-                syncAlarmSchedule();
-                if (isAlarmRinging) refillAlarmSchedule(true);
+        const ctx = getAudioContext();
+        if (ctx && (ctx.state === 'suspended' || ctx.state === 'interrupted')) {
+            ctx.resume().then(() => {
+                if (isAlarmSoundActive) {
+                    playToneBurst();
+                }
             }).catch(() => { });
         }
     } catch (err) {
@@ -1690,7 +1764,26 @@ function updateLoggedDisplays() {
 
     updateProgressBar(currentTodaySec);
     updateLiveIncrementUI();
+    checkShiftCap();
 }
+
+// Decoupled 8h cap & overtime evaluator: runs even when isLiveIncrement is false/paused
+function checkShiftCap() {
+    const cap = state.dailyCapSeconds || TARGET_DAILY_SEC;
+    const hasSessionData = state.loggedSeconds > 0 || baseTodaySec > 0 || (Array.isArray(detectedDays) && detectedDays.some(d => d && d.sec > 0));
+    if (!hasSessionData) return;
+
+    if (state.loggedSeconds >= 28800 || state.loggedSeconds >= cap || state.remainingSeconds <= 0) {
+        const overtimeSec = Math.max(0, state.loggedSeconds - cap, state.overtimeSeconds || 0);
+        const graceRemainingSec = Math.max(0, 300 - overtimeSec);
+        updateGraceViolationBanner(overtimeSec, graceRemainingSec);
+
+        if (!alarmDismissed) {
+            startContinuousAudibleAlarm();
+        }
+    }
+}
+window.checkShiftCap = checkShiftCap;
 
 function updateProgressBar(loggedSeconds) {
     const targetSeconds = state.dailyCapSeconds || TARGET_DAILY_SEC; // 28,800s
@@ -1941,12 +2034,8 @@ function renderAll(options = {}) {
 
     updateLoggedDisplays();
 
-    // Re-arm for the new target. Uses silenceAlarm() rather than stopAlarm(): the old code called
-    // stopAlarm() here, which set alarmDismissed = true and prevented the alarm from ever firing.
-    // Never cut off an alarm that is already ringing just because a sync/re-render happened
-    // while the (still passed) target is unchanged — only an explicit tap on "Silence" may stop it.
-    const targetStillPassed = targetStopTimestamp && targetStopTimestamp <= Date.now();
-    if (!(isAlarmRinging && targetStillPassed)) {
+    const isAtOrOverCap = state.loggedSeconds >= (state.dailyCapSeconds || TARGET_DAILY_SEC) || (state.loggedSeconds > 0 && state.remainingSeconds <= 0);
+    if (!isAtOrOverCap && !isAlarmSoundActive) {
         silenceAlarm();
         alarmDismissed = restore ? !!restore.alarmDismissed : false;
     }
@@ -2023,9 +2112,9 @@ function tickCountdown() {
             countdown.classList.add('text-emerald-400');
             timerCompleted = true;
 
-            if (!isAlarmRinging && !alarmDismissed) {
+            if (!alarmDismissed) {
                 alarmTargetMs = targetMs;
-                startContinuousAlarm();
+                startContinuousAudibleAlarm();
             }
 
             // Add a prominent red warning banner when time exceeds 08h 00m 00s,
@@ -2314,7 +2403,7 @@ async function handleReturningToForeground() {
                     restore: {
                         startTime: timerStartTime || Date.now(),
                         target: targetTimestamp || new Date(),
-                        alarmDismissed: remoteRem <= 0
+                        alarmDismissed: alarmDismissed
                     }
                 });
                 updateLoggedDisplays();
@@ -2358,34 +2447,29 @@ window.addEventListener('pageshow', () => {
 // Starts the continuous alarm. Keeps ringing until the user taps "Silence & Stop Timer".
 // Calling again with { urgent: true } escalates an already-ringing alarm (violation zone).
 function startContinuousAlarm({ urgent = false } = {}) {
-    const wasRinging = isAlarmRinging;
-    if (wasRinging && (alarmUrgent || !urgent)) return;
-
     alarmUrgent = urgent;
-    if (!wasRinging) {
-        playAlarmLoop();
-    } else {
-        primeAudioContext();
-        refillAlarmSchedule(true);
-    }
-
-    showAlarmOverlay();
-    triggerSystemNotification(urgent);
+    startContinuousAudibleAlarm();
 }
 
 function showAlarmOverlay() {
-    alarmBanner.classList.remove('hidden');
-    try { dismissBtn.focus({ preventScroll: true }); } catch (e) { }
+    if (alarmBanner) alarmBanner.classList.remove('hidden');
+    try { if (dismissBtn) dismissBtn.focus({ preventScroll: true }); } catch (e) { }
     startTitleFlash();
 }
 
 function hideAlarmOverlay() {
-    alarmBanner.classList.add('hidden');
+    if (alarmBanner) alarmBanner.classList.add('hidden');
     stopTitleFlash();
 }
 
 // Internal: silence everything without marking the alarm as user-acknowledged
 function silenceAlarm() {
+    isAlarmSoundActive = false;
+    isAlarmRinging = false;
+    if (alarmPulseInterval) {
+        clearInterval(alarmPulseInterval);
+        alarmPulseInterval = null;
+    }
     stopAlarmLoop();
     alarmUrgent = false;
     alarmTargetMs = null;
@@ -2397,41 +2481,35 @@ function silenceAlarm() {
     }
 }
 
-// User acknowledgement. No-op when nothing is ringing.
+// User acknowledgement
 function stopAlarm() {
-    if (!isAlarmRinging) return;
-    alarmDismissed = true;
     const ackTarget = alarmTargetMs || (targetTimestamp ? targetTimestamp.getTime() : null);
-    silenceAlarm();
+    silenceAudibleAlarm();
     if (ackTarget) {
         try { writeJSON(SESSION_KEYS.alarmAck, new Date(ackTarget).toISOString()); } catch (e) { }
     }
 }
 
-// "Silence & Stop Timer" button: the ONLY way to stop a ringing alarm
+// "Silence & Stop Timer" button
 function silenceAndStopTimer() {
-    stopAlarm();
+    silenceAudibleAlarm();
     requestSpringboardStop();
 }
 
-// Independent 1s watchdog (NOT cleared when the tab goes to the background, unlike the
-// countdown tickers). Fires the alarm, keeps the ringing schedule topped up, keeps the
-// grace/violation banner live even after auto-stop, and keeps the pre-armed alarm in sync.
+// Independent 1s watchdog (runs even when isLiveIncrement is false or tab is backgrounded)
 function alarmWatchdogTick() {
     try {
+        checkShiftCap();
+
         const targetMs = getArmableTargetMs();
-        if (targetMs && Date.now() >= targetMs && !isAlarmRinging && !alarmDismissed) {
-            tickCountdown(); // triggers alarm + grace banner + Springboard auto-stop
+        if (targetMs && Date.now() >= targetMs && !isAlarmSoundActive && !alarmDismissed) {
+            tickCountdown();
         }
 
-        if (isAlarmRinging && alarmTargetMs) {
+        if (isAlarmSoundActive && alarmTargetMs) {
             const overtimeSec = Math.max(0, Math.floor((Date.now() - alarmTargetMs) / 1000));
             updateGraceViolationBanner(overtimeSec, Math.max(0, 300 - overtimeSec));
-            if (overtimeSec >= 300 && !alarmUrgent) startContinuousAlarm({ urgent: true });
-            refillAlarmSchedule();
         }
-
-        syncAlarmSchedule();
     } catch (e) {
         console.warn('snip8: alarm watchdog error', e);
     }
@@ -2827,7 +2905,7 @@ async function refreshSnip8Session() {
             restore: {
                 startTime: timerStartTime || Date.now(),
                 target: targetTimestamp || new Date(),
-                alarmDismissed: remSec <= 0
+                alarmDismissed: alarmDismissed
             }
         });
         updateLoggedDisplays();
@@ -3577,7 +3655,7 @@ function loadCachedSession(userPin = getUserPin(), workDate = getWorkDate()) {
             restore: {
                 startTime: updatedAt.getTime(),
                 target,
-                alarmDismissed: rem <= 0
+                alarmDismissed: alarmDismissed
             }
         });
 
@@ -3718,7 +3796,7 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
                 restore: {
                     startTime: updatedAt.getTime(),
                     target,
-                    alarmDismissed: state.remainingSeconds <= 0
+                    alarmDismissed: alarmDismissed
                 }
             });
 

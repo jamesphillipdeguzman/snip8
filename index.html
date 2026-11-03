@@ -190,10 +190,18 @@
                     </div>
                 </div>
             </div>
-            <div class="shrink-0 text-right">
+            <div class="shrink-0 text-right flex items-center">
                 <span id="graceSecondsBadge" class="px-3 py-1.5 rounded-lg bg-black/50 border border-yellow-400 text-xs sm:text-sm font-bold text-yellow-300 font-mono">
                     --
                 </span>
+                <button 
+                    id="silenceAlarmBtn" 
+                    type="button"
+                    onclick="silenceAudibleAlarm()" 
+                    class="ml-3 px-3 py-1 bg-white text-rose-700 font-bold text-xs rounded hover:bg-rose-50 shadow transition-colors"
+                >
+                    🔕 Silence Alarm
+                </button>
             </div>
         </div>
 
