@@ -507,13 +507,11 @@ function clearUserPin() {
 // Browsers start AudioContexts "suspended" until a user gesture, so we create one context
 // and resume it on every gesture/alarm instead of spawning a new (blocked) context per beep.
 let audioCtx = null;
-
-// Continuous alarm engine state.
-// Beeps are scheduled ahead on the AUDIO clock (ctx.currentTime), which is not throttled in
-// background tabs, so the alarm keeps ringing even while you're working in the Springboard tab.
-let alarmGain = null;            // master gain owning the active (ringing) alarm schedule
+let alarmOscillator = null;
+let alarmGain = null;
+let alarmPulseTimeout = null;
 let alarmScheduledUntil = 0;     // ctx time up to which ringing beeps are scheduled
-let alarmToggle = false;         // alternates the two alarm pitches
+let alarmToggle = true;          // alternates the two alarm pitches (880Hz / 587.33Hz)
 let alarmUrgent = false;         // true once past the 8h 05m violation cutoff (faster beeps)
 let alarmTargetMs = null;        // target that triggered the current alarm (for overtime math)
 let preArmGain = null;           // gain owning beeps pre-scheduled at the future target time
@@ -521,56 +519,78 @@ let preArmTargetMs = null;
 let preArmCtxStart = 0;
 const ALARM_SCHEDULE_HORIZON_SEC = 90;   // > 60s so Chrome's 1/min background throttling can't create gaps
 const ALARM_REFILL_THRESHOLD_SEC = 75;
-const ALARM_MASTER_VOLUME = 0.3;
+const ALARM_MASTER_VOLUME = 0.35;
 
 function getAudioContext() {
     if (!audioCtx) {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (!AC) return null;
-        audioCtx = new AC();
+        const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtxClass) return null;
+        audioCtx = new AudioCtxClass();
     }
     return audioCtx;
 }
 
-// Called on every user gesture: creates/unlocks the AudioContext so the alarm can sound later
-function initAudio() {
-    const ctx = getAudioContext();
-    if (ctx && (ctx.state === 'suspended' || ctx.state === 'interrupted')) {
-        ctx.resume().then(() => {
-            syncAlarmSchedule();
-            if (isAlarmRinging) refillAlarmSchedule(true);
-            updateAudioLockIndicator();
-        }).catch(() => { });
+// Initialize or resume the audio context automatically on any user interaction
+function primeAudioContext() {
+    try {
+        if (!audioCtx) {
+            const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+            if (AudioCtxClass) {
+                audioCtx = new AudioCtxClass();
+            }
+        }
+        if (audioCtx && (audioCtx.state === 'suspended' || audioCtx.state === 'interrupted')) {
+            audioCtx.resume().then(() => {
+                syncAlarmSchedule();
+                if (isAlarmRinging) refillAlarmSchedule(true);
+            }).catch(() => { });
+        }
+    } catch (err) {
+        // Fail silently; will retry on next user gesture
     }
-    updateAudioLockIndicator();
+    return audioCtx;
+}
+const initAudio = primeAudioContext;
+
+async function ensureAudioRunning() {
+    const ctx = primeAudioContext();
+    if (!ctx) return null;
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+        try { await ctx.resume(); } catch (e) { /* still locked until a user gesture */ }
+    }
     return ctx;
 }
 
-// Schedules alternating alarm beeps (D5 / A5) between fromTime and untilTime on the audio clock
-function scheduleAlarmBeeps(ctx, destination, fromTime, untilTime, urgent, startToggle) {
-    const step = urgent ? 0.25 : 0.4;
-    const len = urgent ? 0.18 : 0.25;
+// Attach silent unblocker to natural app gestures (pasting, clicking, tapping, typing)
+['click', 'touchstart', 'keydown', 'paste', 'pointerdown', 'touchend'].forEach(evt => {
+    document.addEventListener(evt, primeAudioContext, { capture: true, passive: true });
+});
+
+// Schedules alternating high-attention square-wave alarm pulses (880Hz / 587.33Hz)
+// on the audio clock so background tabs continue ringing without throttling gaps
+function scheduleAlarmBeeps(ctx, destination, fromTime, untilTime, urgent, startHighTone) {
+    const step = urgent ? 0.25 : 0.35;
+    const len = urgent ? 0.15 : 0.2;
     let t = fromTime;
-    let toggle = startToggle;
+    let highTone = startHighTone;
     while (t < untilTime) {
         const osc = ctx.createOscillator();
         const env = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(toggle ? 880 : 587.33, t); // A5 and D5 alternating
-        // Short attack/release envelope to avoid clicks
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(highTone ? 880 : 587.33, t); // High-attention frequency toggle
         env.gain.setValueAtTime(0, t);
-        env.gain.linearRampToValueAtTime(1, t + 0.01);
-        env.gain.setValueAtTime(1, t + len - 0.02);
+        env.gain.linearRampToValueAtTime(1, t + 0.008);
+        env.gain.setValueAtTime(1, t + len - 0.015);
         env.gain.linearRampToValueAtTime(0, t + len);
         osc.connect(env);
         env.connect(destination);
         osc.start(t);
         osc.stop(t + len + 0.01);
         osc.onended = () => { try { osc.disconnect(); env.disconnect(); } catch (e) { } };
-        toggle = !toggle;
+        highTone = !highTone;
         t += step;
     }
-    return { until: t, toggle };
+    return { until: t, toggle: highTone };
 }
 
 // Keeps the ringing alarm scheduled ~90s ahead. reset=true rebuilds the schedule from "now".
@@ -583,13 +603,67 @@ function refillAlarmSchedule(reset = false) {
         alarmGain = ctx.createGain();
         alarmGain.gain.setValueAtTime(ALARM_MASTER_VOLUME, ctx.currentTime);
         alarmGain.connect(ctx.destination);
-        alarmScheduledUntil = ctx.currentTime + 0.05;
+        alarmScheduledUntil = ctx.currentTime + 0.02;
     }
     if (alarmScheduledUntil - ctx.currentTime > ALARM_REFILL_THRESHOLD_SEC) return;
-    const from = Math.max(alarmScheduledUntil, ctx.currentTime + 0.05);
+    const from = Math.max(alarmScheduledUntil, ctx.currentTime + 0.02);
     const r = scheduleAlarmBeeps(ctx, alarmGain, from, ctx.currentTime + ALARM_SCHEDULE_HORIZON_SEC, alarmUrgent, alarmToggle);
     alarmScheduledUntil = r.until;
     alarmToggle = r.toggle;
+}
+
+function playAlarmLoop() {
+    if (isAlarmRinging) return;
+    primeAudioContext();
+    if (!audioCtx) return;
+
+    isAlarmRinging = true;
+    cancelPreArm();
+
+    if (alarmGain) { try { alarmGain.disconnect(); } catch (e) { } }
+    alarmGain = audioCtx.createGain();
+    alarmGain.gain.setValueAtTime(ALARM_MASTER_VOLUME, audioCtx.currentTime);
+    alarmGain.connect(audioCtx.destination);
+
+    // If AudioContext is already running, schedule ahead on the audio clock for background resilience;
+    // also run the pulse loop fallback if the context just resumed.
+    if (audioCtx.state === 'running') {
+        alarmScheduledUntil = audioCtx.currentTime + 0.02;
+        refillAlarmSchedule(false);
+    } else {
+        let highTone = true;
+        function pulse() {
+            if (!isAlarmRinging || !audioCtx) return;
+            if (audioCtx.state === 'running') {
+                refillAlarmSchedule(true);
+                return;
+            }
+            try {
+                const osc = audioCtx.createOscillator();
+                osc.type = 'square';
+                osc.frequency.setValueAtTime(highTone ? 880 : 587.33, audioCtx.currentTime);
+                osc.connect(alarmGain);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.2);
+                highTone = !highTone;
+            } catch (e) { }
+            alarmPulseTimeout = setTimeout(pulse, 350);
+        }
+        pulse();
+    }
+}
+
+function stopAlarmLoop() {
+    isAlarmRinging = false;
+    if (alarmPulseTimeout) {
+        clearTimeout(alarmPulseTimeout);
+        alarmPulseTimeout = null;
+    }
+    if (alarmGain && audioCtx) {
+        try { alarmGain.disconnect(); } catch (e) { }
+    }
+    alarmGain = null;
+    alarmScheduledUntil = 0;
 }
 
 function cancelPreArm() {
@@ -626,81 +700,10 @@ function syncAlarmSchedule() {
     preArmGain = ctx.createGain();
     preArmGain.gain.setValueAtTime(ALARM_MASTER_VOLUME, ctx.currentTime);
     preArmGain.connect(ctx.destination);
-    scheduleAlarmBeeps(ctx, preArmGain, desiredStart, desiredStart + ALARM_SCHEDULE_HORIZON_SEC, false, false);
+    scheduleAlarmBeeps(ctx, preArmGain, desiredStart, desiredStart + ALARM_SCHEDULE_HORIZON_SEC, false, true);
     preArmTargetMs = target;
     preArmCtxStart = desiredStart;
 }
-
-// Header button doubles as an "audio locked" indicator until the page gets a user gesture
-let lastAudioLockState = null;
-function updateAudioLockIndicator() {
-    const btn = document.getElementById('testAudioBtn');
-    if (!btn) return;
-    const locked = !audioCtx || audioCtx.state !== 'running';
-    const key = locked ? 'locked' : 'ok';
-    if (key === lastAudioLockState) return;
-    lastAudioLockState = key;
-    if (locked) {
-        btn.innerHTML = '<span>🔇</span> Enable Alarm Sound';
-        btn.title = 'Your browser blocks sound until you interact with the page once. Click to enable the alarm sound.';
-        btn.classList.add('ring-2', 'ring-amber-400', 'text-amber-300');
-    } else {
-        btn.innerHTML = '<span>🔔</span> Test Chime';
-        btn.title = 'Alarm sound enabled. Click to test.';
-        btn.classList.remove('ring-2', 'ring-amber-400', 'text-amber-300');
-    }
-}
-
-async function ensureAudioRunning() {
-    const ctx = getAudioContext();
-    if (!ctx) return null;
-    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
-        try { await ctx.resume(); } catch (e) { /* still locked until a user gesture */ }
-    }
-    return ctx;
-}
-
-// Web Audio Chime (Triple Bell Pattern)
-async function playBeep() {
-    try {
-        const ctx = await ensureAudioRunning();
-        if (!ctx || ctx.state !== 'running') {
-            console.warn('snip8: audio is locked until you click or press a key on the page.');
-            return false;
-        }
-
-        const start = ctx.currentTime + 0.05;
-        const notes = [587.33, 739.99, 880]; // D5, F#5, A5
-        notes.forEach((freq, idx) => {
-            const t = start + idx * 0.15;
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-
-            osc.type = 'triangle';
-            osc.frequency.setValueAtTime(freq, t);
-
-            gain.gain.setValueAtTime(0, t);
-            gain.gain.linearRampToValueAtTime(0.3, t + 0.02);
-            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-
-            osc.start(t);
-            osc.stop(t + 0.4);
-            osc.onended = () => { osc.disconnect(); gain.disconnect(); };
-        });
-        return true;
-    } catch (e) {
-        console.error("Audio error", e);
-        return false;
-    }
-}
-
-// Unlock audio on any user gesture so the alarm can sound later without interaction
-['click', 'pointerdown', 'touchstart', 'touchend', 'keydown'].forEach(evt =>
-    document.addEventListener(evt, initAudio, { capture: true, passive: true })
-);
 
 // ===== Desktop Notifications =====
 let notificationPermissionAsked = false;
@@ -738,10 +741,6 @@ function triggerSystemNotification(urgent = false) {
     }
 }
 
-document.getElementById('testAudioBtn').addEventListener('click', () => {
-    requestNotificationPermission();
-    playBeep();
-});
 
 /**
  * Client-side resizing and optimization for mobile devices.
@@ -2362,12 +2361,13 @@ function startContinuousAlarm({ urgent = false } = {}) {
     const wasRinging = isAlarmRinging;
     if (wasRinging && (alarmUrgent || !urgent)) return;
 
-    isAlarmRinging = true;
     alarmUrgent = urgent;
-    cancelPreArm(); // the live schedule takes over from any pre-armed beeps
-
-    initAudio();             // try to resume (succeeds if the page was ever interacted with)
-    refillAlarmSchedule(true);
+    if (!wasRinging) {
+        playAlarmLoop();
+    } else {
+        primeAudioContext();
+        refillAlarmSchedule(true);
+    }
 
     showAlarmOverlay();
     triggerSystemNotification(urgent);
@@ -2386,12 +2386,9 @@ function hideAlarmOverlay() {
 
 // Internal: silence everything without marking the alarm as user-acknowledged
 function silenceAlarm() {
-    isAlarmRinging = false;
+    stopAlarmLoop();
     alarmUrgent = false;
     alarmTargetMs = null;
-    if (alarmGain) { try { alarmGain.disconnect(); } catch (e) { } }
-    alarmGain = null;
-    alarmScheduledUntil = 0;
     cancelPreArm();
     hideAlarmOverlay();
     if (alarmNotification) {
@@ -2435,7 +2432,6 @@ function alarmWatchdogTick() {
         }
 
         syncAlarmSchedule();
-        updateAudioLockIndicator();
     } catch (e) {
         console.warn('snip8: alarm watchdog error', e);
     }
@@ -4226,7 +4222,7 @@ function initTabsAndSettings() {
     const copyBookmarkletBtnText = document.getElementById('copyBookmarkletBtnText');
     if (copyBookmarkletBtn) {
         copyBookmarkletBtn.addEventListener('click', async () => {
-            const bookmarkletCode = "javascript:(function(){if(window._sbSyncBridgeRunning){alert('Sync Bridge is already running.');return;}let p=localStorage.getItem('snip8_bridge_pin')||localStorage.getItem('snip8_user_pin');if(!p){p=prompt('Enter your 6-digit snip8 PIN:');if(!p)return;localStorage.setItem('snip8_bridge_pin',p.trim());}window._sbSyncBridgeRunning=true;const t=document.createElement('div');t.innerText='Sync Bridge Connected (PIN: '+p+')';t.style.cssText='position:fixed;bottom:16px;right:16px;background:#10b981;color:#fff;padding:8px 14px;border-radius:6px;font-size:12px;z-index:999999;box-shadow:0 4px 6px rgba(0,0,0,0.15);font-family:sans-serif;pointer-events:none;transition:opacity 0.5s ease;';document.body.appendChild(t);setTimeout(()=>{t.style.opacity='0';setTimeout(()=>t.remove(),500);},3000);setInterval(async()=>{try{const r=await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p));if(!r.ok)return;const d=await r.json();if(d&&d.stop_requested){const b=Array.from(document.querySelectorAll('button')).find(x=>x.textContent.trim().toLowerCase().includes('stop timer'));if(b){b.click();}await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p)+'&action=clear',{method:'POST'});}}catch(e){}},10000);})();";
+            const bookmarkletCode = "javascript:(function(){if(window._sbSyncBridgeRunning){alert('Sync Bridge is already running.');return;}let p=localStorage.getItem('snip8_bridge_pin');if(!p){p=prompt('Enter your 6-digit snip8 PIN:');if(!p)return;localStorage.setItem('snip8_bridge_pin',p.trim());}window._sbSyncBridgeRunning=true;const t=document.createElement('div');t.innerText='Sync Bridge Connected (PIN: '+p+')';t.style.cssText='position:fixed;bottom:16px;right:16px;background:#10b981;color:#fff;padding:8px 14px;border-radius:6px;font-size:12px;z-index:999999;box-shadow:0 4px 6px rgba(0,0,0,0.15);font-family:sans-serif;pointer-events:none;transition:opacity 0.5s ease;';document.body.appendChild(t);setTimeout(()=>{t.style.opacity='0';setTimeout(()=>t.remove(),500);},3000);fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p)+'&action=clear',{method:'POST'}).catch(function(){});setInterval(async()=>{try{const r=await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p)+'&t='+Date.now());if(!r.ok)return;const d=await r.json();if(d&&d.stop_requested){const b=Array.from(document.querySelectorAll('button')).find(x=>x.textContent.trim().toLowerCase().includes('stop timer'));if(b){b.click();}await fetch('https://snip8-eight.vercel.app/api/timer-signal?pin='+encodeURIComponent(p)+'&action=clear',{method:'POST'});}}catch(e){}},10000);})();";
             try {
                 await navigator.clipboard.writeText(bookmarkletCode);
                 if (copyBookmarkletBtnText) {
