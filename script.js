@@ -1286,6 +1286,9 @@ async function applyAiValidationResult(aiResult, base64Image) {
 
     rawOcrText.textContent = `=== VALIDATED VIA AI VISION (Gemini) ===\nModel: ${aiResult.modelUsed}\nConfidence: ${aiResult.confidence}\nLogged: ${formatHms(state.loggedSeconds)}\nRemaining for 8h: ${formatHms(state.remainingSeconds)}\n\nShifts:\n${JSON.stringify(aiResult.shifts, null, 2)}`;
 
+    // Automatically disarm any residual stop signal when starting a new block
+    disarmStopSignal();
+
     renderAll({ forceNewAnchor: true });
     debouncedSaveSession();
     return true;
@@ -1696,6 +1699,8 @@ async function applyLocalOcrResult(finalLoggedSec, totalHeaderSec, calculatedShi
     setValidationProgress(100, 'Timesheet successfully synced!', 'success');
 
     // Local OCR completed successfully
+    // Automatically disarm any residual stop signal when starting a new block
+    disarmStopSignal();
     updateParseSourceBadge('ocr');
 
     if (aiValidationNotice) aiValidationNotice.classList.add('hidden');
@@ -1909,7 +1914,7 @@ function initLiveIncrementToggle() {
                 // Clear remote stop signal so cross-device sync doesn't immediately re-pause
                 const pin = state.userPin || getUserPin();
                 if (pin) {
-                    fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&action=clear`, { method: 'POST' }).catch(() => {});
+                    disarmStopSignal();
                 }
 
                 if (!timerCompleted && state.remainingSeconds > 0 && !countdownInterval) {
@@ -2321,6 +2326,7 @@ async function handleReturningToForeground() {
     }
 
     // 2. Perform silent, non-blocking fetch to check for handoff / progress from another device
+    checkSignalStatus();
     const pin = state.userPin || getUserPin();
     const date = state.workDate || getWorkDate();
     if (!pin || !navigator.onLine) return;
@@ -2589,6 +2595,95 @@ if (dismissBtn) {
     });
 }
 
+// ===== Interactive Signal Status Badge & Manual Disarm Toggle =====
+let currentStopRequestedState = false;
+
+function getActivePin() {
+    return (state && state.userPin) || getUserPin() || (localStorage.getItem('snip8_bridge_pin') || '').trim();
+}
+window.getActivePin = getActivePin;
+
+function showToast(message) {
+    if (typeof setValidationProgress === 'function') {
+        setValidationProgress(100, message, 'success');
+    }
+    try {
+        const existing = document.getElementById('snip8SignalToast');
+        if (existing) existing.remove();
+        const toast = document.createElement('div');
+        toast.id = 'snip8SignalToast';
+        toast.textContent = message;
+        toast.className = 'fixed bottom-4 right-4 z-[9999] px-4 py-2 rounded-lg bg-emerald-600 text-white text-xs font-mono font-semibold shadow-lg transition-opacity duration-300';
+        document.body.appendChild(toast);
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 300);
+        }, 2600);
+    } catch (e) { }
+}
+window.showToast = showToast;
+
+// 1. Render badge visual states
+function updateSignalBadge(isStopRequested) {
+    currentStopRequestedState = Boolean(isStopRequested);
+    const badge = document.getElementById('stopSignalBadge');
+    const dot = document.getElementById('signalDot');
+    const text = document.getElementById('signalText');
+    if (!badge || !dot || !text) return;
+
+    if (currentStopRequestedState) {
+        // ARMED / TRUE: Pending stop request waiting to kill Springboard
+        badge.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold transition-all border cursor-pointer select-none bg-rose-500/15 border-rose-500 text-rose-400 hover:bg-rose-500/25 animate-pulse';
+        dot.className = 'w-2 h-2 rounded-full bg-rose-500';
+        text.textContent = 'Signal: STOP PENDING (Reset)';
+    } else {
+        // IDLE / FALSE: Safe, bridge will not stop timer
+        badge.className = 'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-medium transition-all border cursor-pointer select-none bg-slate-800/80 border-slate-700 text-slate-300 hover:border-slate-500';
+        dot.className = 'w-2 h-2 rounded-full bg-emerald-400';
+        text.textContent = 'Signal: IDLE (Safe)';
+    }
+}
+window.updateSignalBadge = updateSignalBadge;
+
+// 2. Fetch current signal status from Neon DB
+async function checkSignalStatus() {
+    const pin = getActivePin();
+    if (!pin) return;
+    try {
+        const res = await fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&t=${Date.now()}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        updateSignalBadge(data?.stop_requested);
+    } catch (err) {
+        console.error('Failed to check signal status:', err);
+    }
+}
+window.checkSignalStatus = checkSignalStatus;
+
+// 3. Click handler to manually disarm / clear stop_requested -> FALSE
+async function disarmStopSignal() {
+    const pin = getActivePin();
+    if (!pin) return;
+
+    // Optimistic UI update
+    updateSignalBadge(false);
+
+    try {
+        await fetch(`/api/timer-signal?pin=${encodeURIComponent(pin)}&action=clear`, {
+            method: 'POST'
+        });
+        if (typeof showToast === 'function') {
+            showToast('Signal reset: stop_requested is now FALSE');
+        }
+    } catch (err) {
+        console.error('Failed to disarm stop signal:', err);
+        checkSignalStatus(); // Revert to actual server state on error
+    }
+}
+window.disarmStopSignal = disarmStopSignal;
+
+document.getElementById('stopSignalBadge')?.addEventListener('click', disarmStopSignal);
+
 // Helper to dispatch remote stop signal to Springboard bridge
 async function requestSpringboardStop() {
     const btn = document.getElementById('btnStopSpringboard');
@@ -2679,6 +2774,7 @@ async function requestSpringboardStop() {
 
         if (res.ok && data.success) {
             if (btn) btn.textContent = 'Stop Requested ⏹️';
+            updateSignalBadge(true);
         } else {
             throw new Error(data.error || 'Failed to dispatch stop signal');
         }
@@ -2697,6 +2793,7 @@ function initCrossDeviceSyncListener() {
     if (window.crossDeviceSyncInterval) return;
 
     window.crossDeviceSyncInterval = setInterval(async () => {
+        checkSignalStatus();
         // Only check if local UI currently thinks it is ticking
         if (!state.isLiveIncrement) return;
 
@@ -2821,6 +2918,7 @@ async function refreshSnip8Session() {
         }
 
         updateNeonBadge('syncing', 'Syncing...');
+        checkSignalStatus();
         const res = await fetch(`/api/snip8-session?pin=${encodeURIComponent(pin)}&work_date=${encodeURIComponent(workDate)}`, {
             headers: { 'x-user-pin': pin }
         });
@@ -3692,6 +3790,7 @@ async function revalidateNeonSession(userPin = getUserPin(), workDate = getWorkD
 
     try {
         updateNeonBadge('syncing', 'Checking cloud...');
+        checkSignalStatus();
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
@@ -4491,6 +4590,7 @@ async function initApp() {
     initTabsAndSettings();
     updatePinUI();
     startAlarmWatchdog();
+    checkSignalStatus();
 
     // Ask for OS notification permission up front (alarm fallback when sound is blocked)
     try {
