@@ -152,53 +152,40 @@
             </div>
         </nav>
 
-        <!-- Loud Alarm Banner (sticky; click anywhere on it or press Esc to silence) -->
-        <div id="alarmBanner" role="alertdialog" aria-live="assertive" aria-labelledby="alarmTitle"
-            aria-describedby="alarmDesc"
-            class="hidden sticky top-2 z-50 select-none bg-gradient-to-r from-rose-600 to-red-700 border-2 border-white/90 p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 alarm-ring">
-            <div class="flex items-center gap-3">
-                <span class="text-3xl animate-bounce" aria-hidden="true">⏰</span>
-                <div>
-                    <div id="alarmTitle" class="font-extrabold text-white text-lg tracking-tight">8 HOURS REACHED — STOP
-                        TIMER!</div>
-                    <div id="alarmDesc" class="text-sm text-rose-50">Clock out in Springboard / Clockify now before
-                        passing the 5-minute grace period.</div>
-                    <div class="text-[11px] text-rose-100 mt-1 font-mono">The alarm keeps ringing until you tap
-                        <strong class="text-white">Silence &amp; Stop Timer</strong>.
-                    </div>
-                </div>
-            </div>
-            <button id="dismissBtn" type="button"
-                class="shrink-0 px-6 py-3 bg-white text-rose-800 font-black uppercase tracking-wide rounded-xl text-sm shadow-lg hover:bg-rose-50 focus:outline-none focus-visible:ring-4 focus-visible:ring-yellow-300 active:scale-95 transition">
-                🔕 Silence &amp; Stop Timer
-            </button>
-        </div>
-
         <!-- TAB 1: TIMER (Default Active View) -->
         <main id="timerTab" class="tab-content space-y-5">
-        <!-- Section 4.a: Strict 8h Cap Exceeded & Grace Cutoff Red Warning Banner -->
-        <div id="graceViolationBanner" role="alert" aria-live="assertive"
-            class="hidden w-full p-4 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 border-2 border-red-300 shadow-xl text-white font-mono flex items-center justify-between gap-3 animate-pulse">
+        <!-- Authoritative Section 4.a Strict 8h Cap Exceeded & Grace Cutoff Compliance Banner -->
+        <div id="graceViolationBanner" role="alertdialog" aria-live="assertive" aria-labelledby="graceViolationTitle"
+            aria-describedby="graceViolationCountdown"
+            class="hidden sticky top-2 z-50 w-full p-4 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 border-2 border-red-300 shadow-xl text-white font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 alarm-ring">
             <div class="flex items-center gap-3">
                 <span class="text-3xl" aria-hidden="true">⚠️</span>
                 <div>
                     <div id="graceViolationTitle" class="font-extrabold text-sm sm:text-base text-white tracking-wide">
-                        STRICT 8H CAP EXCEEDED — CLOCK OUT NOW
+                        ⚠️ STRICT 8H CAP EXCEEDED — CLOCK OUT NOW
                     </div>
                     <div id="graceViolationCountdown" class="text-xs sm:text-sm text-red-100 font-semibold mt-0.5">
                         Exceeded 08h 00m 00s. Calculating grace period...
                     </div>
                 </div>
             </div>
-            <div class="shrink-0 text-right flex items-center">
+            <div class="shrink-0 flex flex-wrap items-center gap-2 self-end sm:self-auto">
                 <span id="graceSecondsBadge" class="px-3 py-1.5 rounded-lg bg-black/50 border border-yellow-400 text-xs sm:text-sm font-bold text-yellow-300 font-mono">
                     --
                 </span>
+                <button
+                    id="bannerStopSpringboardBtn"
+                    type="button"
+                    onclick="silenceAndStopTimer()"
+                    class="px-3 py-1.5 bg-slate-950/90 hover:bg-black text-white border border-white/40 font-bold text-xs rounded-lg shadow transition-colors active:scale-95"
+                >
+                    ⏹️ Stop Springboard
+                </button>
                 <button 
                     id="silenceAlarmBtn" 
                     type="button"
                     onclick="silenceAudibleAlarm()" 
-                    class="ml-3 px-3 py-1 bg-white text-rose-700 font-bold text-xs rounded hover:bg-rose-50 shadow transition-colors"
+                    class="px-3 py-1.5 bg-white text-rose-700 font-bold text-xs rounded-lg hover:bg-rose-50 shadow transition-colors active:scale-95"
                 >
                     🔕 Silence Alarm
                 </button>

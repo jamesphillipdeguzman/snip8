@@ -288,6 +288,7 @@ let pendingReparseCallback = null;
 
 function updateGraceViolationBanner(overtimeSec, graceRemainingSec) {
     if (!graceViolationBanner || !graceViolationCountdown || !graceSecondsBadge) return;
+    if (alarmDismissed) return;
     graceViolationBanner.classList.remove('hidden');
 
     if (graceRemainingSec > 0) {
@@ -295,14 +296,14 @@ function updateGraceViolationBanner(overtimeSec, graceRemainingSec) {
         graceViolationCountdown.textContent = `Shift time: 08h 00m + ${overtimeSec}s. Strictly ${graceRemainingSec}s remaining before reaching the hard 08h 05m 00s violation cutoff!`;
         graceSecondsBadge.textContent = `${graceRemainingSec}s remaining`;
         graceSecondsBadge.className = 'px-3 py-1.5 rounded-lg bg-black/50 border border-yellow-400 text-xs sm:text-sm font-bold text-yellow-300 font-mono';
-        graceViolationBanner.className = 'w-full p-4 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 border-2 border-red-300 shadow-xl text-white font-mono flex items-center justify-between gap-3 animate-pulse';
+        graceViolationBanner.className = 'sticky top-2 z-50 w-full p-4 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 border-2 border-red-300 shadow-xl text-white font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 alarm-ring';
     } else {
         const violationSec = Math.max(0, overtimeSec - 300);
         if (graceViolationTitle) graceViolationTitle.textContent = '🚨 SECTION 4.a CRITICAL POLICY VIOLATION';
         graceViolationCountdown.textContent = `EXCEEDED 08h 05m 00s HARD CAP by ${violationSec}s! Springboard clock-out overdue.`;
         graceSecondsBadge.textContent = `+${violationSec}s OVER LIMIT`;
         graceSecondsBadge.className = 'px-3 py-1.5 rounded-lg bg-black/70 border border-red-300 text-xs sm:text-sm font-extrabold text-red-300 font-mono animate-bounce';
-        graceViolationBanner.className = 'w-full p-4 rounded-2xl bg-red-950 border-2 border-red-500 shadow-2xl text-white font-mono flex items-center justify-between gap-3';
+        graceViolationBanner.className = 'sticky top-2 z-50 w-full p-4 rounded-2xl bg-red-950 border-2 border-red-500 shadow-2xl text-white font-mono flex flex-col sm:flex-row sm:items-center justify-between gap-3 alarm-ring';
     }
 }
 
@@ -395,10 +396,10 @@ const dispStopTime = document.getElementById('dispStopTime');
 const dispRemaining = document.getElementById('dispRemaining');
 const countdown = document.getElementById('countdown');
 const weeklyTableBody = document.getElementById('weeklyTableBody');
-const alarmBanner = document.getElementById('alarmBanner');
+const alarmBanner = document.getElementById('graceViolationBanner');
 const rawOcrText = document.getElementById('rawOcrText');
 const liveIncrementToggle = document.getElementById('liveIncrementToggle');
-const dismissBtn = document.getElementById('dismissBtn');
+const dismissBtn = document.getElementById('silenceAlarmBtn');
 const sessionMeta = document.getElementById('sessionMeta');
 const syncMobileBtn = document.getElementById('syncMobileBtn');
 const syncModal = document.getElementById('syncModal');
@@ -1771,16 +1772,20 @@ function updateLoggedDisplays() {
 function checkShiftCap() {
     const cap = state.dailyCapSeconds || TARGET_DAILY_SEC;
     const hasSessionData = state.loggedSeconds > 0 || baseTodaySec > 0 || (Array.isArray(detectedDays) && detectedDays.some(d => d && d.sec > 0));
-    if (!hasSessionData) return;
+    if (!hasSessionData) {
+        hideGraceViolationBanner();
+        return;
+    }
 
     if (state.loggedSeconds >= 28800 || state.loggedSeconds >= cap || state.remainingSeconds <= 0) {
-        const overtimeSec = Math.max(0, state.loggedSeconds - cap, state.overtimeSeconds || 0);
-        const graceRemainingSec = Math.max(0, 300 - overtimeSec);
-        updateGraceViolationBanner(overtimeSec, graceRemainingSec);
-
         if (!alarmDismissed) {
+            const overtimeSec = Math.max(0, state.loggedSeconds - cap, state.overtimeSeconds || 0);
+            const graceRemainingSec = Math.max(0, 300 - overtimeSec);
+            updateGraceViolationBanner(overtimeSec, graceRemainingSec);
             startContinuousAudibleAlarm();
         }
+    } else {
+        hideGraceViolationBanner();
     }
 }
 window.checkShiftCap = checkShiftCap;
@@ -2452,13 +2457,16 @@ function startContinuousAlarm({ urgent = false } = {}) {
 }
 
 function showAlarmOverlay() {
-    if (alarmBanner) alarmBanner.classList.remove('hidden');
+    const cap = state.dailyCapSeconds || TARGET_DAILY_SEC;
+    const overtimeSec = Math.max(0, (state.loggedSeconds || cap) - cap, state.overtimeSeconds || 0);
+    const graceRemainingSec = Math.max(0, 300 - overtimeSec);
+    updateGraceViolationBanner(overtimeSec, graceRemainingSec);
     try { if (dismissBtn) dismissBtn.focus({ preventScroll: true }); } catch (e) { }
     startTitleFlash();
 }
 
 function hideAlarmOverlay() {
-    if (alarmBanner) alarmBanner.classList.add('hidden');
+    hideGraceViolationBanner();
     stopTitleFlash();
 }
 
@@ -2490,11 +2498,12 @@ function stopAlarm() {
     }
 }
 
-// "Silence & Stop Timer" button
+// "Stop Springboard" / "Silence & Stop Timer" action
 function silenceAndStopTimer() {
     silenceAudibleAlarm();
     requestSpringboardStop();
 }
+window.silenceAndStopTimer = silenceAndStopTimer;
 
 // Independent 1s watchdog (runs even when isLiveIncrement is false or tab is backgrounded)
 function alarmWatchdogTick() {
@@ -2573,11 +2582,12 @@ document.getElementById('adjustMinus1').addEventListener('click', () => adjustRe
 document.getElementById('adjustPlus1').addEventListener('click', () => adjustRemaining(60));
 document.getElementById('adjustPlus5').addEventListener('click', () => adjustRemaining(300));
 
-// Only an explicit tap on "Silence & Stop Timer" stops the alarm (no banner-click / Esc dismissal)
-dismissBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    silenceAndStopTimer();
-});
+if (dismissBtn) {
+    dismissBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        silenceAudibleAlarm();
+    });
+}
 
 // Helper to dispatch remote stop signal to Springboard bridge
 async function requestSpringboardStop() {
@@ -2785,7 +2795,10 @@ window.initCrossDeviceSyncListener = initCrossDeviceSyncListener;
 
 const btnStopSpringboard = document.getElementById('btnStopSpringboard');
 if (btnStopSpringboard) {
-    btnStopSpringboard.addEventListener('click', requestSpringboardStop);
+    btnStopSpringboard.addEventListener('click', () => {
+        silenceAudibleAlarm();
+        requestSpringboardStop();
+    });
 }
 
 // Helper to manually sync and refresh data from Neon DB
